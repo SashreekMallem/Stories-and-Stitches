@@ -56,21 +56,10 @@ type Step =
   | "SUCCESS";
 
 const conditionSchema = z.object({
-  description: z
-    .string()
-    .min(10, { message: "Please describe the book's condition in more detail." })
-    .max(500, { message: "Description must not exceed 500 characters." }),
+  description: z.string(),
 });
 
 const CAPTURE_DELAY = 10000; // 10 seconds
-
-const CONDITION_CAPTURE_STEPS = [
-  "Front Cover",
-  "Back Cover",
-  "Spine",
-  "Random Page (e.g. page 42)",
-  "Closed book from top",
-];
 
 type CapturedImageData = {
   label: string;
@@ -112,7 +101,8 @@ export function BookIntakeFlow() {
 
   const currentConditionStepLabel = conditionCaptureSteps[conditionCaptureStepIndex];
 
-  const isConditionDescriptionValid = conditionForm.watch('description').length >= 10;
+  // We don't need user input for condition, so this is always "valid"
+  const isConditionDescriptionValid = true;
   
   useEffect(() => {
     setIsClient(true);
@@ -171,7 +161,7 @@ export function BookIntakeFlow() {
         setStep("METADATA_CAPTURE");
       } else {
         setMetadata(result);
-        setStep("METADATA_CONFIRM");
+        setStep("CONDITION_CAPTURE");
       }
     } catch (error) {
       console.error("Metadata extraction error:", error);
@@ -184,12 +174,13 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
 
-  const handleAssessCondition = useCallback(async (description: string, photos: CapturedImageData[]) => {
+  const handleAssessCondition = useCallback(async (photos: CapturedImageData[]) => {
     setStep("ASSESSMENT_LOADING");
     try {
+      // Pass an empty string for description as it's no longer used
       const result = await assessBookCondition({
         photoDataUris: photos,
-        description,
+        description: "User did not provide a description. Assess based on images.",
       });
       setAssessment(result);
       setStep("ASSESSMENT_CONFIRM");
@@ -207,7 +198,7 @@ export function BookIntakeFlow() {
   // Effect for camera permission
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-    if (!isCaptureStep) return;
+    if (!isCaptureStep || !isClient) return;
 
     let stream: MediaStream;
     const enableCamera = async () => {
@@ -235,7 +226,7 @@ export function BookIntakeFlow() {
     return () => {
         stopTimer();
     }
-  }, [step, toast, stopTimer]);
+  }, [step, toast, stopTimer, isClient]);
 
   // Effect for timer-based capture
   useEffect(() => {
@@ -258,6 +249,10 @@ export function BookIntakeFlow() {
                 const frame = captureFrame();
                 if (frame) {
                     if (isMetadataCapture) {
+                         // For metadata, we also need to add it to our list of condition images
+                        const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
+                        setConditionImages([initialImage]);
+                        setConditionCaptureStepIndex(1); // Move to the next condition step
                         handleExtractMetadata(frame);
                     } else if (isConditionCapture) {
                         const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
@@ -267,8 +262,7 @@ export function BookIntakeFlow() {
                         if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
                             setConditionCaptureStepIndex(prevIndex => prevIndex + 1);
                         } else {
-                            const description = conditionForm.getValues('description');
-                            handleAssessCondition(description, updatedImages);
+                            handleAssessCondition(updatedImages);
                         }
                     }
                 }
@@ -281,7 +275,7 @@ export function BookIntakeFlow() {
     return () => {
       stopTimer();
     };
-  }, [step, hasCameraPermission, isConditionDescriptionValid, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
+  }, [step, hasCameraPermission, isConditionDescriptionValid, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition]);
   
   if (!isClient) {
     return (
@@ -322,12 +316,11 @@ export function BookIntakeFlow() {
 
       case "METADATA_CAPTURE":
       case "METADATA_LOADING":
-      case "METADATA_CONFIRM":
         return (
             <Card className="w-full shadow-lg animate-in fade-in duration-500">
                 <CardHeader>
                     <CardTitle className="text-3xl font-headline">Step 1: Identify Your Book</CardTitle>
-                    {step !== 'METADATA_CONFIRM' && <CardDescription>Position your book cover in the frame. We'll take a picture automatically.</CardDescription>}
+                    <CardDescription>Position your book cover in the frame. We'll take a picture automatically.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col items-center gap-6">
                  <canvas ref={canvasRef} className="hidden" />
@@ -335,18 +328,6 @@ export function BookIntakeFlow() {
                     <div className="flex flex-col items-center justify-center h-64 gap-4">
                         <Loader2 className="w-12 h-12 text-primary animate-spin" />
                         <p className="text-muted-foreground">Extracting book details...</p>
-                    </div>
-                ) : step === "METADATA_CONFIRM" && metadata ? (
-                    <div className="w-full flex flex-col items-center gap-4">
-                        <Image src={capturedImage || "https://placehold.co/300x400.png"} alt="Book Cover" width={150} height={200} className="rounded-md shadow-md" data-ai-hint="book cover"/>
-                        <div className="w-full space-y-2">
-                            <Label htmlFor="title">Title</Label>
-                            <Input id="title" value={metadata.title} readOnly />
-                        </div>
-                        <div className="w-full space-y-2">
-                            <Label htmlFor="author">Author</Label>
-                            <Input id="author" value={metadata.author} readOnly />
-                        </div>
                     </div>
                 ) : (
                     <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
@@ -381,17 +362,13 @@ export function BookIntakeFlow() {
                 )}
                 </CardContent>
                 <CardFooter className="flex justify-between">
-                {step === "METADATA_CONFIRM" ? (
-                    <>
-                        <Button variant="outline" onClick={() => { setCapturedImage(null); setStep("METADATA_CAPTURE"); }}><RefreshCw className="mr-2" /> Try Again</Button>
-                        <Button onClick={() => setStep("CONDITION_CAPTURE")}>Looks Good, Next Step</Button>
-                    </>
-                ) : (
                    <Button variant="ghost" onClick={handleReset}>Cancel</Button>
-                )}
                 </CardFooter>
             </Card>
         );
+
+      case "METADATA_CONFIRM": // This case is now effectively skipped and merged into the condition flow
+        return null;
 
       case "CONDITION_CAPTURE":
       case "ASSESSMENT_LOADING":
@@ -399,7 +376,7 @@ export function BookIntakeFlow() {
          return (
              <Card className="w-full shadow-lg animate-in fade-in duration-500">
                  <CardHeader>
-                     <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CONFIRM')}><ChevronLeft /> Back</Button>
+                     <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CAPTURE')}><ChevronLeft /> Back to start</Button>
                      <CardTitle className="text-3xl font-headline">Step 2: Assess Condition</CardTitle>
                      {step !== 'ASSESSMENT_CONFIRM' && <CardDescription>Follow the steps to capture all angles of your book.</CardDescription>}
                  </CardHeader>
@@ -411,10 +388,20 @@ export function BookIntakeFlow() {
                     </div>
                 ) : step === "ASSESSMENT_CONFIRM" && assessment ? (
                     <div className="space-y-6">
-                        <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                        {metadata && (
+                            <div className="w-full flex items-center gap-4 p-4 bg-muted rounded-lg">
+                                <Image src={capturedImage || "https://placehold.co/150x200.png"} alt="Book Cover" width={75} height={100} className="rounded-md shadow-md" data-ai-hint="book cover"/>
+                                <div className="space-y-1">
+                                    <p className="font-bold text-lg">{metadata.title}</p>
+                                    <p className="text-muted-foreground">{metadata.author}</p>
+                                </div>
+                            </div>
+                        )}
+                        <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
                             {conditionImages.map(img => (
                                 <div key={img.label} className="relative aspect-[3/4]">
                                     <Image src={img.dataUri} alt={img.label} fill className="rounded-md object-cover" data-ai-hint="book damage"/>
+                                    <div className="absolute bottom-0 w-full bg-black/50 text-white text-xs text-center p-0.5 truncate">{img.label}</div>
                                 </div>
                             ))}
                         </div>
@@ -432,21 +419,16 @@ export function BookIntakeFlow() {
                       </div>
                     </div>
                 ) : (
-                    <Form {...conditionForm}>
-                      <form onSubmit={e => e.preventDefault()} className="space-y-6">
-                        <FormField
-                            control={conditionForm.control}
-                            name="description"
-                            render={({ field }) => (
-                                <FormItem>
-                                <FormLabel>Overall Condition Description</FormLabel>
-                                <FormControl>
-                                    <Textarea placeholder="e.g., Slight yellowing of pages, cover has a small crease on the corner..." {...field} />
-                                </FormControl>
-                                <FormMessage />
-                                </FormItem>
-                            )}
-                            />
+                      <div className="space-y-6">
+                        {metadata && (
+                            <div className="w-full flex items-center gap-4 p-4 bg-muted rounded-lg">
+                                <Image src={capturedImage || "https://placehold.co/150x200.png"} alt="Book Cover" width={75} height={100} className="rounded-md shadow-md" data-ai-hint="book cover"/>
+                                <div className="space-y-1">
+                                    <p className="font-bold text-lg">{metadata.title}</p>
+                                    <p className="text-muted-foreground">{metadata.author}</p>
+                                </div>
+                            </div>
+                        )}
                         <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
                              {hasCameraPermission === false ? (
                                 <Alert variant="destructive" className="m-4">
@@ -456,12 +438,7 @@ export function BookIntakeFlow() {
                                     Please enable camera permissions in your browser settings to use this feature.
                                     </AlertDescription>
                                 </Alert>
-                            ) : !isConditionDescriptionValid ? (
-                                <div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
-                                  <Camera className="w-16 h-16" />
-                                  <p className="font-medium">Describe the book's condition first</p>
-                                </div>
-                             ) : hasCameraPermission === null ? (
+                            ) : hasCameraPermission === null ? (
                                 <div className="flex flex-col items-center gap-2">
                                     <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
                                     <p className="text-muted-foreground">Requesting camera...</p>
@@ -489,8 +466,7 @@ export function BookIntakeFlow() {
                                 ))}
                             </div>
                         </div>
-                      </form>
-                    </Form>
+                      </div>
                  )}
                  </CardContent>
                  <CardFooter className="flex justify-between">
@@ -538,3 +514,5 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
+
+    
