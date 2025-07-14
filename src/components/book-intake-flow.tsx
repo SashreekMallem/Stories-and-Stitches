@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import Image from "next/image";
 import {
   BookHeart,
@@ -62,6 +62,8 @@ const conditionSchema = z.object({
     .max(500, { message: "Description must not exceed 500 characters." }),
 });
 
+const CAPTURE_DELAY = 3000; // 3 seconds
+
 export function BookIntakeFlow() {
   const [step, setStep] = useState<Step>("WELCOME");
   const [metadata, setMetadata] = useState<ExtractBookMetadataOutput | null>(null);
@@ -72,61 +74,12 @@ export function BookIntakeFlow() {
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-
-  useEffect(() => {
-    const getCameraPermission = async () => {
-      if (step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE') {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          setHasCameraPermission(true);
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-        } catch (error) {
-          console.error('Error accessing camera:', error);
-          setHasCameraPermission(false);
-          toast({
-            variant: 'destructive',
-            title: 'Camera Access Denied',
-            description: 'Please enable camera permissions in your browser settings to use this feature.',
-          });
-        }
-      } else {
-        // Stop camera when not on a capture step
-        if (videoRef.current && videoRef.current.srcObject) {
-            const stream = videoRef.current.srcObject as MediaStream;
-            stream.getTracks().forEach(track => track.stop());
-            videoRef.current.srcObject = null;
-        }
-      }
-    };
-
-    getCameraPermission();
-    
-    // Cleanup function
-    return () => {
-        if (videoRef.current && videoRef.current.srcObject) {
-            const stream = videoRef.current.srcObject as MediaStream;
-            stream.getTracks().forEach(track => track.stop());
-        }
-    }
-  }, [step, toast]);
-
-
-  const form = useForm<z.infer<typeof conditionSchema>>({
+  const conditionForm = useForm<z.infer<typeof conditionSchema>>({
     resolver: zodResolver(conditionSchema),
     defaultValues: { description: "" },
   });
 
-  const handleReset = () => {
-    setStep("WELCOME");
-    setMetadata(null);
-    setAssessment(null);
-    setCapturedImage(null);
-    form.reset();
-  };
-  
-  const captureFrame = (): string | null => {
+  const captureFrame = useCallback((): string | null => {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
@@ -139,16 +92,17 @@ export function BookIntakeFlow() {
       }
     }
     return null;
-  }
+  }, []);
 
-  const handleExtractMetadata = async () => {
+  const handleExtractMetadata = useCallback(async () => {
     const photoDataUri = captureFrame();
     if (!photoDataUri) {
         toast({
             variant: "destructive",
             title: "Capture Failed",
-            description: "Could not capture an image from the camera. Please ensure permissions are granted and the camera is working.",
+            description: "Could not capture an image. Please ensure camera is working.",
         });
+        setStep("METADATA_CAPTURE");
         return;
     }
     setCapturedImage(photoDataUri);
@@ -175,9 +129,9 @@ export function BookIntakeFlow() {
       });
       setStep("METADATA_CAPTURE");
     }
-  };
+  }, [captureFrame, toast]);
 
-  const handleAssessCondition = async (values: z.infer<typeof conditionSchema>) => {
+  const handleAssessCondition = useCallback(async (values: z.infer<typeof conditionSchema>) => {
     const photoDataUri = captureFrame();
      if (!photoDataUri) {
         toast({
@@ -205,7 +159,73 @@ export function BookIntakeFlow() {
       });
       setStep("CONDITION_CAPTURE");
     }
+  }, [captureFrame, toast]);
+
+
+  useEffect(() => {
+    const getCameraPermission = async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+        setHasCameraPermission(true);
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+        }
+      } catch (error) {
+        console.error('Error accessing camera:', error);
+        setHasCameraPermission(false);
+        toast({
+          variant: 'destructive',
+          title: 'Camera Access Denied',
+          description: 'Please enable camera permissions in your browser settings to use this feature.',
+        });
+      }
+    };
+
+    let captureTimeout: NodeJS.Timeout;
+
+    if (step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE') {
+        getCameraPermission();
+    }
+    
+    if (step === 'METADATA_CAPTURE' && hasCameraPermission) {
+        captureTimeout = setTimeout(handleExtractMetadata, CAPTURE_DELAY);
+    }
+    
+    if (step === 'CONDITION_CAPTURE' && hasCameraPermission) {
+      const description = conditionForm.getValues('description');
+      if (description) {
+        captureTimeout = setTimeout(() => handleAssessCondition(conditionForm.getValues()), CAPTURE_DELAY);
+      }
+    }
+
+    // Stop camera when not on a capture step
+    if (step !== 'METADATA_CAPTURE' && step !== 'CONDITION_CAPTURE') {
+      if (videoRef.current && videoRef.current.srcObject) {
+          const stream = videoRef.current.srcObject as MediaStream;
+          stream.getTracks().forEach(track => track.stop());
+          videoRef.current.srcObject = null;
+      }
+    }
+    
+    // Cleanup function
+    return () => {
+        clearTimeout(captureTimeout);
+        if (videoRef.current && videoRef.current.srcObject) {
+            const stream = videoRef.current.srcObject as MediaStream;
+            stream.getTracks().forEach(track => track.stop());
+        }
+    }
+  }, [step, hasCameraPermission, toast, handleExtractMetadata, handleAssessCondition, conditionForm]);
+
+
+  const handleReset = () => {
+    setStep("WELCOME");
+    setMetadata(null);
+    setAssessment(null);
+    setCapturedImage(null);
+    conditionForm.reset();
   };
+  
 
   const renderStep = () => {
     switch (step) {
@@ -235,7 +255,7 @@ export function BookIntakeFlow() {
             <Card className="w-full shadow-lg animate-in fade-in duration-500">
                 <CardHeader>
                     <CardTitle className="text-3xl font-headline">Step 1: Identify Your Book</CardTitle>
-                    <CardDescription>Let's find out which book you're swapping.</CardDescription>
+                    {step !== 'METADATA_CONFIRM' && <CardDescription>Position your book cover in the frame. We'll scan it automatically.</CardDescription>}
                 </CardHeader>
                 <CardContent className="flex flex-col items-center gap-6">
                  <canvas ref={canvasRef} className="hidden" />
@@ -275,9 +295,11 @@ export function BookIntakeFlow() {
                            <>
                                 <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/20">
-                                    <Camera className="w-16 h-16 text-white/50" />
-                                    <p className="text-center text-white/80 mt-2 font-medium">
-                                        Position your book cover in the frame.
+                                    <div className="p-4 bg-white/30 backdrop-blur-sm rounded-full">
+                                      <Camera className="w-16 h-16 text-white" />
+                                    </div>
+                                    <p className="text-center text-white mt-4 font-medium drop-shadow-md">
+                                        Hold steady...
                                     </p>
                                 </div>
                            </>
@@ -289,16 +311,10 @@ export function BookIntakeFlow() {
                 {step === "METADATA_CONFIRM" ? (
                     <>
                         <Button variant="outline" onClick={() => { setCapturedImage(null); setStep("METADATA_CAPTURE"); }}><RefreshCw className="mr-2" /> Try Again</Button>
-                        <Button onClick={() => setStep("CONDITION_CAPTURE")}>Looks Good</Button>
+                        <Button onClick={() => setStep("CONDITION_CAPTURE")}>Looks Good, Next Step</Button>
                     </>
                 ) : (
-                    <>
-                        <Button variant="ghost" onClick={handleReset}>Cancel</Button>
-                        <Button onClick={handleExtractMetadata} disabled={step === "METADATA_LOADING" || !hasCameraPermission}>
-                            {step === "METADATA_LOADING" ? <Loader2 className="animate-spin" /> : <Camera />}
-                            Scan Book Cover
-                        </Button>
-                    </>
+                   <Button variant="ghost" onClick={handleReset}>Cancel</Button>
                 )}
                 </CardFooter>
             </Card>
@@ -312,7 +328,7 @@ export function BookIntakeFlow() {
                  <CardHeader>
                      <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CONFIRM')}><ChevronLeft /> Back</Button>
                      <CardTitle className="text-3xl font-headline">Step 2: Assess Condition</CardTitle>
-                     <CardDescription>Help us understand your book's condition to estimate its credit value.</CardDescription>
+                     <CardDescription>Describe any damage, then show us a picture. We'll scan automatically.</CardDescription>
                  </CardHeader>
                  <CardContent>
                  {step === "ASSESSMENT_LOADING" ? (
@@ -337,8 +353,8 @@ export function BookIntakeFlow() {
                       </div>
                     </div>
                 ) : (
-                    <Form {...form}>
-                      <form onSubmit={form.handleSubmit(handleAssessCondition)} className="space-y-6">
+                    <Form {...conditionForm}>
+                      <form onSubmit={e => e.preventDefault()} className="space-y-6">
                         <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
                              {hasCameraPermission === false ? (
                                 <Alert variant="destructive" className="m-4">
@@ -357,8 +373,10 @@ export function BookIntakeFlow() {
                             <>
                                     <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/20">
-                                        <Camera className="w-16 h-16 text-white/50" />
-                                        <p className="text-center text-white/80 mt-2 font-medium">
+                                         <div className="p-4 bg-white/30 backdrop-blur-sm rounded-full">
+                                          <Camera className="w-16 h-16 text-white" />
+                                        </div>
+                                        <p className="text-center text-white mt-4 font-medium drop-shadow-md">
                                             Show any wear, tear, or defining features.
                                         </p>
                                     </div>
@@ -366,7 +384,7 @@ export function BookIntakeFlow() {
                             )}
                         </div>
                          <FormField
-                            control={form.control}
+                            control={conditionForm.control}
                             name="description"
                             render={({ field }) => (
                                 <FormItem>
@@ -385,13 +403,12 @@ export function BookIntakeFlow() {
                  <CardFooter className="flex justify-between">
                      {step === 'ASSESSMENT_CONFIRM' ? (
                         <>
-                            <Button variant="outline" onClick={() => setStep('CONDITION_CAPTURE')}>Try Again</Button>
+                            <Button variant="outline" onClick={() => { setCapturedImage(null); setStep('CONDITION_CAPTURE');}}>Try Again</Button>
                             <Button onClick={() => setStep('SUCCESS')}>Deposit & Get Credits</Button>
                         </>
                      ) : (
-                        <Button className="w-full" type="submit" onClick={form.handleSubmit(handleAssessCondition)} disabled={step === "ASSESSMENT_LOADING" || !hasCameraPermission}>
-                            {step === "ASSESSMENT_LOADING" ? <Loader2 className="animate-spin" /> : <Camera />}
-                            Estimate Credit
+                        <Button className="w-full" onClick={conditionForm.handleSubmit(handleAssessCondition)} disabled={step === "ASSESSMENT_LOADING" || !hasCameraPermission || !conditionForm.formState.isValid}>
+                           {step === "ASSESSMENT_LOADING" ? <Loader2 className="animate-spin" /> : "Confirm Description and Scan"}
                         </Button>
                      )}
                  </CardFooter>
