@@ -1,7 +1,7 @@
 
 "use client";
 
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import Image from "next/image";
 import {
   BookHeart,
@@ -45,7 +45,6 @@ import { assessBookCondition } from "@/ai/flows/assess-book-condition";
 import type { AssessBookConditionOutput } from "@/ai/flows/assess-book-condition";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
-
 type Step =
   | "WELCOME"
   | "METADATA_CAPTURE"
@@ -65,12 +64,27 @@ const conditionSchema = z.object({
 
 const CAPTURE_DELAY = 10000; // 10 seconds
 
+const CONDITION_CAPTURE_STEPS = [
+  "Front Cover",
+  "Back Cover",
+  "Spine",
+  "Random Page (e.g. page 42)",
+  "Closed book from top",
+];
+
+type CapturedImageData = {
+  label: string;
+  dataUri: string;
+};
+
 export function BookIntakeFlow() {
   const [step, setStep] = useState<Step>("WELCOME");
   const [metadata, setMetadata] = useState<ExtractBookMetadataOutput | null>(null);
   const [assessment, setAssessment] = useState<AssessBookConditionOutput | null>(null);
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
+  const [conditionImages, setConditionImages] = useState<CapturedImageData[]>([]);
+  const [conditionCaptureStepIndex, setConditionCaptureStepIndex] = useState(0);
   const [countdown, setCountdown] = useState(CAPTURE_DELAY / 1000);
   const [isClient, setIsClient] = useState(false);
   const { toast } = useToast();
@@ -84,6 +98,20 @@ export function BookIntakeFlow() {
     defaultValues: { description: "" },
   });
   
+  const randomPage = useMemo(() => `Random Page (e.g. page ${Math.floor(Math.random() * 100) + 20})`, []);
+
+  const conditionCaptureSteps = useMemo(() => [
+    "Front Cover",
+    "Back Cover",
+    "Spine",
+    randomPage,
+    "Closed book from top",
+    "Closed book from bottom",
+    "Closed book from side"
+  ], [randomPage]);
+
+  const currentConditionStepLabel = conditionCaptureSteps[conditionCaptureStepIndex];
+
   const isConditionDescriptionValid = conditionForm.watch('description').length >= 10;
   
   useEffect(() => {
@@ -103,6 +131,8 @@ export function BookIntakeFlow() {
     setMetadata(null);
     setAssessment(null);
     setCapturedImage(null);
+    setConditionImages([]);
+    setConditionCaptureStepIndex(0);
     setHasCameraPermission(null);
     if(videoRef.current?.srcObject){
         const stream = videoRef.current.srcObject as MediaStream;
@@ -154,12 +184,11 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
 
-  const handleAssessCondition = useCallback(async (description: string, photoDataUri: string) => {
-    setCapturedImage(photoDataUri);
+  const handleAssessCondition = useCallback(async (description: string, photos: CapturedImageData[]) => {
     setStep("ASSESSMENT_LOADING");
     try {
       const result = await assessBookCondition({
-        photoDataUri,
+        photoDataUris: photos,
         description,
       });
       setAssessment(result);
@@ -231,8 +260,16 @@ export function BookIntakeFlow() {
                     if (isMetadataCapture) {
                         handleExtractMetadata(frame);
                     } else if (isConditionCapture) {
-                        const description = conditionForm.getValues('description');
-                        handleAssessCondition(description, frame);
+                        const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
+                        const updatedImages = [...conditionImages, newImage];
+                        setConditionImages(updatedImages);
+
+                        if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
+                            setConditionCaptureStepIndex(prevIndex => prevIndex + 1);
+                        } else {
+                            const description = conditionForm.getValues('description');
+                            handleAssessCondition(description, updatedImages);
+                        }
                     }
                 }
                 return 0;
@@ -244,7 +281,7 @@ export function BookIntakeFlow() {
     return () => {
       stopTimer();
     };
-  }, [step, hasCameraPermission, isConditionDescriptionValid, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
+  }, [step, hasCameraPermission, isConditionDescriptionValid, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
   
   if (!isClient) {
     return (
@@ -364,17 +401,23 @@ export function BookIntakeFlow() {
                  <CardHeader>
                      <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CONFIRM')}><ChevronLeft /> Back</Button>
                      <CardTitle className="text-3xl font-headline">Step 2: Assess Condition</CardTitle>
-                     <CardDescription>Describe any damage, then show us a picture of it. We'll take one automatically.</CardDescription>
+                     {step !== 'ASSESSMENT_CONFIRM' && <CardDescription>Follow the steps to capture all angles of your book.</CardDescription>}
                  </CardHeader>
                  <CardContent>
                  {step === "ASSESSMENT_LOADING" ? (
-                    <div className="flex flex-col items-center justify-center h-64 gap-4">
+                    <div className="flex flex-col items-center justify-center h-96 gap-4">
                         <Loader2 className="w-12 h-12 text-primary animate-spin" />
-                        <p className="text-muted-foreground">Estimating credit value...</p>
+                        <p className="text-muted-foreground">Estimating credit value from all angles...</p>
                     </div>
                 ) : step === "ASSESSMENT_CONFIRM" && assessment ? (
                     <div className="space-y-6">
-                       {capturedImage && <Image src={capturedImage} alt="Book Condition" width={150} height={200} className="rounded-md shadow-md mx-auto" data-ai-hint="book damage"/>}
+                        <div className="grid grid-cols-3 sm:grid-cols-4 gap-4">
+                            {conditionImages.map(img => (
+                                <div key={img.label} className="relative aspect-[3/4]">
+                                    <Image src={img.dataUri} alt={img.label} fill className="rounded-md object-cover" data-ai-hint="book damage"/>
+                                </div>
+                            ))}
+                        </div>
                       <div className="space-y-2">
                         <Label>Condition Score: {Math.round(assessment.conditionScore * 100)}%</Label>
                         <Progress value={assessment.conditionScore * 100} className="h-4"/>
@@ -396,7 +439,7 @@ export function BookIntakeFlow() {
                             name="description"
                             render={({ field }) => (
                                 <FormItem>
-                                <FormLabel>Condition Description</FormLabel>
+                                <FormLabel>Overall Condition Description</FormLabel>
                                 <FormControl>
                                     <Textarea placeholder="e.g., Slight yellowing of pages, cover has a small crease on the corner..." {...field} />
                                 </FormControl>
@@ -416,7 +459,7 @@ export function BookIntakeFlow() {
                             ) : !isConditionDescriptionValid ? (
                                 <div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
                                   <Camera className="w-16 h-16" />
-                                  <p className="font-medium">Describe the damage first</p>
+                                  <p className="font-medium">Describe the book's condition first</p>
                                 </div>
                              ) : hasCameraPermission === null ? (
                                 <div className="flex flex-col items-center gap-2">
@@ -432,11 +475,19 @@ export function BookIntakeFlow() {
                                           <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
                                         </div>
                                         <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
-                                            Show any wear, tear, or defining features.
+                                           Next: <span className="font-bold">{currentConditionStepLabel}</span>
                                         </p>
                                     </div>
                             </>
                             )}
+                        </div>
+                        <div>
+                            <p className="text-sm font-medium">Captured Images ({conditionImages.length}/{conditionCaptureSteps.length})</p>
+                            <div className="flex gap-2 mt-2 flex-wrap">
+                                {conditionImages.map(img => (
+                                    <Image key={img.label} src={img.dataUri} alt={img.label} width={45} height={60} className="rounded" />
+                                ))}
+                            </div>
                         </div>
                       </form>
                     </Form>
@@ -445,7 +496,7 @@ export function BookIntakeFlow() {
                  <CardFooter className="flex justify-between">
                      {step === 'ASSESSMENT_CONFIRM' ? (
                         <>
-                            <Button variant="outline" onClick={() => { setCapturedImage(null); setStep('CONDITION_CAPTURE');}}>Try Again</Button>
+                            <Button variant="outline" onClick={() => { setConditionImages([]); setConditionCaptureStepIndex(0); setStep('CONDITION_CAPTURE');}}>Try Again</Button>
                             <Button onClick={() => setStep('SUCCESS')}>Deposit & Get Credits</Button>
                         </>
                      ) : (

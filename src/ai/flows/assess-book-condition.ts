@@ -12,12 +12,15 @@ import {ai} from '@/ai/genkit';
 import {z} from 'genkit';
 
 const AssessBookConditionInputSchema = z.object({
-  photoDataUri: z
-    .string()
-    .describe(
-      "A photo of the book's condition, as a data URI that must include a MIME type and use Base64 encoding. Expected format: 'data:<mimetype>;base64,<encoded_data>'."
-    ),
-  description: z.string().describe('The description of the book condition.'),
+  photoDataUris: z
+    .array(z.object({
+      label: z.string().describe("The label for the photo (e.g., 'Front Cover', 'Back Cover', 'Spine', 'Random Page')."),
+      dataUri: z.string().describe(
+        "A photo of the book's condition, as a data URI that must include a MIME type and use Base64 encoding. Expected format: 'data:<mimetype>;base64,<encoded_data>'."
+      ),
+    }))
+    .describe('An array of labeled photos of the book from various angles.'),
+  description: z.string().describe('The user-provided description of the book condition.'),
 });
 export type AssessBookConditionInput = z.infer<typeof AssessBookConditionInputSchema>;
 
@@ -48,12 +51,15 @@ const prompt = ai.definePrompt({
   output: {schema: AssessBookConditionOutputSchema},
   prompt: `You are an expert book appraiser specializing in determining the condition and value of used books for credit purposes.
 
-You will use the provided information, including a description and a photo, to assess the book's condition and estimate its credit value.
+You will use the provided information, including a description and a series of photos from different angles, to assess the book's condition and estimate its credit value.
 
 Description: {{{description}}}
-Photo: {{media url=photoDataUri}}
 
-Based on the condition, provide a condition score between 0 and 1 (0 = very poor, 1 = excellent) and an estimated credit value.  Also, provide a justification for your assessment.
+{{#each photoDataUris}}
+Photo ({{this.label}}): {{media url=this.dataUri}}
+{{/each}}
+
+Analyze all images and the description to identify wear, tear, creases, stains, or any other damage. Based on the overall condition, provide a condition score between 0 and 1 (0 = very poor, 1 = excellent) and an estimated credit value. Also, provide a detailed justification for your assessment, referencing specific issues seen in the photos.
 
 Format your response as JSON conforming to the AssessBookConditionOutputSchema schema.`,
 });
