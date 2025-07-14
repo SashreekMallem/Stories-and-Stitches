@@ -85,6 +85,8 @@ export function BookIntakeFlow() {
     defaultValues: { description: "" },
   });
   
+  const isConditionDescriptionValid = conditionForm.watch('description').length >= 10;
+  
   useEffect(() => {
     setIsClient(true);
   }, []);
@@ -168,43 +170,17 @@ export function BookIntakeFlow() {
     }
     setIsScanning(false);
   }, []);
-
-  const startScanning = useCallback((scanType: 'metadata' | 'condition') => {
-    if (isScanning || !hasCameraPermission) return;
-    setIsScanning(true);
-
-    scanIntervalRef.current = setInterval(async () => {
-      const frame = captureFrame();
-      if (!frame) return;
-
-      try {
-        const { isReady } = await isBookReadyForCapture({ photoDataUri: frame });
-        
-        if (isReady) {
-          stopScanning();
-          if (scanType === 'metadata') {
-            await handleExtractMetadata(frame);
-          } else if (scanType === 'condition') {
-            await handleAssessCondition(conditionForm.getValues());
-          }
-        }
-      } catch (error) {
-        console.error("Smart scan error:", error);
-        // Silently fail and retry on next interval
-      }
-    }, SCAN_INTERVAL);
-
-  }, [isScanning, hasCameraPermission, captureFrame, stopScanning, handleExtractMetadata, handleAssessCondition, conditionForm]);
-
+  
   useEffect(() => {
-    const getCameraPermission = async () => {
-      if (typeof window !== 'undefined' && hasCameraPermission === null) {
+    const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
+    if (isCaptureStep && hasCameraPermission === null) {
+      (async () => {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          setHasCameraPermission(true);
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
           }
+          setHasCameraPermission(true);
         } catch (error) {
           console.error('Error accessing camera:', error);
           setHasCameraPermission(false);
@@ -214,35 +190,54 @@ export function BookIntakeFlow() {
             description: 'Please enable camera permissions in your browser settings to use this feature.',
           });
         }
-      }
+      })();
+    }
+
+    if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+  }, [step, hasCameraPermission, toast]);
+
+  useEffect(() => {
+    const startScanning = async (scanType: 'metadata' | 'condition') => {
+      if (isScanning || !hasCameraPermission) return;
+      setIsScanning(true);
+  
+      scanIntervalRef.current = setInterval(async () => {
+        const frame = captureFrame();
+        if (!frame) return;
+  
+        try {
+          const { isReady } = await isBookReadyForCapture({ photoDataUri: frame });
+          
+          if (isReady) {
+            stopScanning();
+            if (scanType === 'metadata') {
+              await handleExtractMetadata(frame);
+            } else if (scanType === 'condition') {
+              await handleAssessCondition(conditionForm.getValues());
+            }
+          }
+        } catch (error) {
+          console.error("Smart scan error:", error);
+        }
+      }, SCAN_INTERVAL);
     };
-  
-    const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-  
-    if (isCaptureStep) {
-      getCameraPermission();
-    }
-  
-    if (step === 'METADATA_CAPTURE' && hasCameraPermission) {
+
+    if (step === 'METADATA_CAPTURE' && hasCameraPermission && !isScanning) {
       startScanning('metadata');
-    }
-  
-    if (step === 'CONDITION_CAPTURE' && hasCameraPermission && conditionForm.formState.isValid) {
+    } else if (step === 'CONDITION_CAPTURE' && hasCameraPermission && isConditionDescriptionValid && !isScanning) {
       startScanning('condition');
+    } else if (isScanning && (step !== 'METADATA_CAPTURE' && step !== 'CONDITION_CAPTURE')) {
+       stopScanning();
     }
-  
-    // Cleanup function
+    
     return () => {
       stopScanning();
-      if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
-        const stream = videoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach(track => track.stop());
-        videoRef.current.srcObject = null;
-      }
     };
-  }, [step, hasCameraPermission, toast, startScanning, stopScanning, conditionForm.formState.isValid]);
-  
-
+  }, [step, hasCameraPermission, isConditionDescriptionValid, isScanning, stopScanning, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
 
   const handleReset = () => {
     setStep("WELCOME");
@@ -419,7 +414,7 @@ export function BookIntakeFlow() {
                                     Please enable camera permissions in your browser settings to use this feature.
                                     </AlertDescription>
                                 </Alert>
-                            ) : !conditionForm.formState.isValid ? (
+                            ) : !isConditionDescriptionValid ? (
                                 <div className="flex flex-col items-center gap-2 text-center text-muted-foreground">
                                   <Camera className="w-16 h-16" />
                                   <p className="font-medium">Describe the damage first</p>
@@ -492,3 +487,5 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
+
+    
