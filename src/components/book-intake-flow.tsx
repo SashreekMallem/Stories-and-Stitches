@@ -237,7 +237,8 @@ export function BookIntakeFlow() {
 
     let stream: MediaStream;
     const enableCamera = async () => {
-        if (hasCameraPermission === true) return;
+        // Always reset camera before enabling
+        resetCamera();
         try {
             stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
             if (videoRef.current) {
@@ -265,7 +266,7 @@ export function BookIntakeFlow() {
         videoElement?.removeEventListener('canplay', handleCanPlay);
         stopTimer();
     }
-  }, [step, isClient, hasCameraPermission, toast, stopTimer, resetCamera]);
+  }, [step, isClient, toast, stopTimer, resetCamera]);
 
   // Effect for timer-based capture
   useEffect(() => {
