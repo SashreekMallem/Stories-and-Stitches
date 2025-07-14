@@ -91,6 +91,29 @@ export function BookIntakeFlow() {
     setIsClient(true);
   }, []);
 
+  const stopScanning = useCallback(() => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+    setIsScanning(false);
+  }, []);
+
+  const handleReset = useCallback(() => {
+    stopScanning();
+    setStep("WELCOME");
+    setMetadata(null);
+    setAssessment(null);
+    setCapturedImage(null);
+    setHasCameraPermission(null);
+    if(videoRef.current?.srcObject){
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+    }
+    conditionForm.reset();
+  }, [stopScanning, conditionForm]);
+
   const captureFrame = useCallback((): string | null => {
     if (videoRef.current && canvasRef.current) {
       const video = videoRef.current;
@@ -105,27 +128,6 @@ export function BookIntakeFlow() {
     }
     return null;
   }, []);
-
-  const handleAssessCondition = useCallback(async (description: string, photoDataUri: string) => {
-    setCapturedImage(photoDataUri);
-    setStep("ASSESSMENT_LOADING");
-    try {
-      const result = await assessBookCondition({
-        photoDataUri,
-        description,
-      });
-      setAssessment(result);
-      setStep("ASSESSMENT_CONFIRM");
-    } catch (error) {
-      console.error("Condition assessment error:", error);
-      toast({
-        variant: "destructive",
-        title: "An Error Occurred",
-        description: "Something went wrong. Please try again later.",
-      });
-      setStep("CONDITION_CAPTURE");
-    }
-  }, [toast]);
 
   const handleExtractMetadata = useCallback(async (photoDataUri: string) => {
     setCapturedImage(photoDataUri);
@@ -154,109 +156,101 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
 
-  const stopScanning = useCallback(() => {
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
+  const handleAssessCondition = useCallback(async (description: string, photoDataUri: string) => {
+    setCapturedImage(photoDataUri);
+    setStep("ASSESSMENT_LOADING");
+    try {
+      const result = await assessBookCondition({
+        photoDataUri,
+        description,
+      });
+      setAssessment(result);
+      setStep("ASSESSMENT_CONFIRM");
+    } catch (error) {
+      console.error("Condition assessment error:", error);
+      toast({
+        variant: "destructive",
+        title: "An Error Occurred",
+        description: "Something went wrong. Please try again later.",
+      });
+      setStep("CONDITION_CAPTURE");
     }
-    if (isScanning) {
-      setIsScanning(false);
-    }
-  }, [isScanning]);
+  }, [toast]);
   
   // Effect for camera permission and stream management
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-    let stream: MediaStream | null = null;
+    let stream: MediaStream;
 
-    if (isCaptureStep && hasCameraPermission === null) {
-      (async () => {
+    const enableCamera = async () => {
         try {
-          stream = await navigator.mediaDevices.getUserMedia({ video: true });
-          if (videoRef.current) {
-            videoRef.current.srcObject = stream;
-          }
-          setHasCameraPermission(true);
+            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            if (videoRef.current) {
+                videoRef.current.srcObject = stream;
+            }
+            setHasCameraPermission(true);
         } catch (error) {
-          console.error('Error accessing camera:', error);
-          setHasCameraPermission(false);
-          toast({
-            variant: 'destructive',
-            title: 'Camera Access Denied',
-            description: 'Please enable camera permissions in your browser settings to use this feature.',
-          });
+            console.error('Error accessing camera:', error);
+            setHasCameraPermission(false);
+            toast({
+                variant: 'destructive',
+                title: 'Camera Access Denied',
+                description: 'Please enable camera permissions in your browser settings to use this feature.',
+            });
         }
-      })();
+    };
+    
+    if (isCaptureStep && !videoRef.current?.srcObject) {
+       enableCamera();
     }
 
     return () => {
-      // Clean up stream when component unmounts or step changes
-      if (videoRef.current && videoRef.current.srcObject) {
-        const mediaStream = videoRef.current.srcObject as MediaStream;
-        const isStillCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-        if (!isStillCaptureStep) {
-            mediaStream.getTracks().forEach(track => track.stop());
-            videoRef.current.srcObject = null;
-        }
+      // Stop scanning when step changes away from a capture step
+      const isStillCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
+      if (!isStillCaptureStep) {
+         stopScanning();
       }
     }
-  }, [step, hasCameraPermission, toast]);
-
+  }, [step, toast, stopScanning]);
 
   // Effect for smart scanning logic
   useEffect(() => {
-    const startScanning = (scanType: 'metadata' | 'condition') => {
-      if (isScanning) return;
-      setIsScanning(true);
-  
-      scanIntervalRef.current = setInterval(async () => {
-        const frame = captureFrame();
-        if (!frame) return;
-  
-        try {
-          const { isReady } = await isBookReadyForCapture({ photoDataUri: frame });
-          
-          if (isReady) {
-            stopScanning();
-            if (scanType === 'metadata') {
-              handleExtractMetadata(frame);
-            } else if (scanType === 'condition') {
-              const description = conditionForm.getValues('description');
-              handleAssessCondition(description, frame);
-            }
-          }
-        } catch (error) {
-          console.error("Smart scan error:", error);
-          // Don't stop scanning on error, just log it.
-        }
-      }, SCAN_INTERVAL);
-    };
+    const scanType = step === 'METADATA_CAPTURE' ? 'metadata' : step === 'CONDITION_CAPTURE' ? 'condition' : null;
+    const canScan = hasCameraPermission && !isScanning && (scanType === 'metadata' || (scanType === 'condition' && isConditionDescriptionValid));
 
-    const shouldScanMetadata = step === 'METADATA_CAPTURE' && hasCameraPermission && !isScanning;
-    const shouldScanCondition = step === 'CONDITION_CAPTURE' && hasCameraPermission && isConditionDescriptionValid && !isScanning;
-
-    if (shouldScanMetadata) {
-      startScanning('metadata');
-    } else if (shouldScanCondition) {
-      startScanning('condition');
-    } else {
-       stopScanning();
+    if (!canScan || !scanType) {
+        if(isScanning) stopScanning();
+        return;
     }
     
+    setIsScanning(true);
+
+    scanIntervalRef.current = setInterval(async () => {
+        const frame = captureFrame();
+        if (!frame) return;
+
+        try {
+            const { isReady } = await isBookReadyForCapture({ photoDataUri: frame });
+            
+            if (isReady) {
+              stopScanning();
+              if (scanType === 'metadata') {
+                handleExtractMetadata(frame);
+              } else if (scanType === 'condition') {
+                const description = conditionForm.getValues('description');
+                handleAssessCondition(description, frame);
+              }
+            }
+        } catch (error) {
+            console.error("Smart scan error:", error);
+            // Don't stop scanning on error, just log it and continue.
+        }
+    }, SCAN_INTERVAL);
+
     return () => {
       stopScanning();
     };
-  }, [step, hasCameraPermission, isConditionDescriptionValid, isScanning, stopScanning, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
-
-  const handleReset = () => {
-    stopScanning();
-    setStep("WELCOME");
-    setMetadata(null);
-    setAssessment(null);
-    setCapturedImage(null);
-    setHasCameraPermission(null);
-    conditionForm.reset();
-  };
+  }, [step, hasCameraPermission, isConditionDescriptionValid, isScanning, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm, stopScanning]);
   
   if (!isClient) {
     return (
@@ -497,5 +491,3 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
-
-    
