@@ -73,6 +73,7 @@ export function BookIntakeFlow() {
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [isScanning, setIsScanning] = useState(false);
+  const [isClient, setIsClient] = useState(false);
   const { toast } = useToast();
   
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -83,6 +84,10 @@ export function BookIntakeFlow() {
     resolver: zodResolver(conditionSchema),
     defaultValues: { description: "" },
   });
+  
+  useEffect(() => {
+    setIsClient(true);
+  }, []);
 
   const captureFrame = useCallback((): string | null => {
     if (videoRef.current && canvasRef.current) {
@@ -193,7 +198,7 @@ export function BookIntakeFlow() {
 
   useEffect(() => {
     const getCameraPermission = async () => {
-      if (hasCameraPermission === null) {
+      if (typeof window !== 'undefined' && hasCameraPermission === null) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ video: true });
           setHasCameraPermission(true);
@@ -248,6 +253,21 @@ export function BookIntakeFlow() {
     conditionForm.reset();
   };
   
+  if (!isClient) {
+    return (
+       <Card className="w-full max-w-2xl shadow-lg">
+         <CardHeader>
+           <CardTitle>Loading...</CardTitle>
+         </CardHeader>
+         <CardContent>
+            <div className="flex flex-col items-center justify-center h-64 gap-4">
+                <Loader2 className="w-12 h-12 text-primary animate-spin" />
+                <p className="text-muted-foreground">Preparing scanner...</p>
+            </div>
+         </CardContent>
+       </Card>
+    );
+  }
 
   const renderStep = () => {
     switch (step) {
