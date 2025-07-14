@@ -11,7 +11,7 @@ import {
   Loader2,
   RefreshCw,
   AlertTriangle,
-  ScanLine,
+  Timer,
 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -43,7 +43,6 @@ import { extractBookMetadata } from "@/ai/flows/extract-book-metadata";
 import type { ExtractBookMetadataOutput } from "@/ai/flows/extract-book-metadata";
 import { assessBookCondition } from "@/ai/flows/assess-book-condition";
 import type { AssessBookConditionOutput } from "@/ai/flows/assess-book-condition";
-import { isBookReadyForCapture } from "@/ai/flows/is-book-ready-for-capture";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 
 
@@ -64,7 +63,7 @@ const conditionSchema = z.object({
     .max(500, { message: "Description must not exceed 500 characters." }),
 });
 
-const SCAN_INTERVAL = 1000; // 1 second
+const CAPTURE_DELAY = 10000; // 10 seconds
 
 export function BookIntakeFlow() {
   const [step, setStep] = useState<Step>("WELCOME");
@@ -72,13 +71,13 @@ export function BookIntakeFlow() {
   const [assessment, setAssessment] = useState<AssessBookConditionOutput | null>(null);
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
-  const [isScanning, setIsScanning] = useState(false);
+  const [countdown, setCountdown] = useState(CAPTURE_DELAY / 1000);
   const [isClient, setIsClient] = useState(false);
   const { toast } = useToast();
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const scanIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const conditionForm = useForm<z.infer<typeof conditionSchema>>({
     resolver: zodResolver(conditionSchema),
@@ -91,16 +90,15 @@ export function BookIntakeFlow() {
     setIsClient(true);
   }, []);
 
-  const stopScanning = useCallback(() => {
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
+  const stopTimer = useCallback(() => {
+    if (timerIntervalRef.current) {
+      clearInterval(timerIntervalRef.current);
+      timerIntervalRef.current = null;
     }
-    setIsScanning(false);
   }, []);
 
   const handleReset = useCallback(() => {
-    stopScanning();
+    stopTimer();
     setStep("WELCOME");
     setMetadata(null);
     setAssessment(null);
@@ -112,7 +110,7 @@ export function BookIntakeFlow() {
         videoRef.current.srcObject = null;
     }
     conditionForm.reset();
-  }, [stopScanning, conditionForm]);
+  }, [stopTimer, conditionForm]);
 
   const captureFrame = useCallback((): string | null => {
     if (videoRef.current && canvasRef.current) {
@@ -177,11 +175,12 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
   
-  // Effect for camera permission and stream management
+  // Effect for camera permission
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-    let stream: MediaStream;
+    if (!isCaptureStep) return;
 
+    let stream: MediaStream;
     const enableCamera = async () => {
         try {
             stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -200,57 +199,52 @@ export function BookIntakeFlow() {
         }
     };
     
-    if (isCaptureStep && !videoRef.current?.srcObject) {
+    if (!videoRef.current?.srcObject) {
        enableCamera();
     }
 
     return () => {
-      // Stop scanning when step changes away from a capture step
-      const isStillCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-      if (!isStillCaptureStep) {
-         stopScanning();
-      }
+        stopTimer();
     }
-  }, [step, toast, stopScanning]);
+  }, [step, toast, stopTimer]);
 
-  // Effect for smart scanning logic
+  // Effect for timer-based capture
   useEffect(() => {
-    const scanType = step === 'METADATA_CAPTURE' ? 'metadata' : step === 'CONDITION_CAPTURE' ? 'condition' : null;
-    const canScan = hasCameraPermission && !isScanning && (scanType === 'metadata' || (scanType === 'condition' && isConditionDescriptionValid));
+    const isMetadataCapture = step === 'METADATA_CAPTURE';
+    const isConditionCapture = step === 'CONDITION_CAPTURE';
+    const canStartTimer = hasCameraPermission && (isMetadataCapture || (isConditionCapture && isConditionDescriptionValid));
 
-    if (!canScan || !scanType) {
-        if(isScanning) stopScanning();
+    if (!canStartTimer) {
+        stopTimer();
+        setCountdown(CAPTURE_DELAY / 1000);
         return;
     }
-    
-    setIsScanning(true);
 
-    scanIntervalRef.current = setInterval(async () => {
-        const frame = captureFrame();
-        if (!frame) return;
+    setCountdown(CAPTURE_DELAY / 1000);
 
-        try {
-            const { isReady } = await isBookReadyForCapture({ photoDataUri: frame });
-            
-            if (isReady) {
-              stopScanning();
-              if (scanType === 'metadata') {
-                handleExtractMetadata(frame);
-              } else if (scanType === 'condition') {
-                const description = conditionForm.getValues('description');
-                handleAssessCondition(description, frame);
-              }
+    timerIntervalRef.current = setInterval(() => {
+        setCountdown(prev => {
+            if (prev <= 1) {
+                stopTimer();
+                const frame = captureFrame();
+                if (frame) {
+                    if (isMetadataCapture) {
+                        handleExtractMetadata(frame);
+                    } else if (isConditionCapture) {
+                        const description = conditionForm.getValues('description');
+                        handleAssessCondition(description, frame);
+                    }
+                }
+                return 0;
             }
-        } catch (error) {
-            console.error("Smart scan error:", error);
-            // Don't stop scanning on error, just log it and continue.
-        }
-    }, SCAN_INTERVAL);
+            return prev - 1;
+        });
+    }, 1000);
 
     return () => {
-      stopScanning();
+      stopTimer();
     };
-  }, [step, hasCameraPermission, isConditionDescriptionValid, isScanning, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm, stopScanning]);
+  }, [step, hasCameraPermission, isConditionDescriptionValid, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
   
   if (!isClient) {
     return (
@@ -296,7 +290,7 @@ export function BookIntakeFlow() {
             <Card className="w-full shadow-lg animate-in fade-in duration-500">
                 <CardHeader>
                     <CardTitle className="text-3xl font-headline">Step 1: Identify Your Book</CardTitle>
-                    {step !== 'METADATA_CONFIRM' && <CardDescription>Position your book cover in the frame. We'll scan it automatically.</CardDescription>}
+                    {step !== 'METADATA_CONFIRM' && <CardDescription>Position your book cover in the frame. We'll take a picture automatically.</CardDescription>}
                 </CardHeader>
                 <CardContent className="flex flex-col items-center gap-6">
                  <canvas ref={canvasRef} className="hidden" />
@@ -336,11 +330,12 @@ export function BookIntakeFlow() {
                            <>
                                 <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                                 <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
-                                    <div className="p-4 bg-white/30 backdrop-blur-sm rounded-full">
-                                      <ScanLine className="w-16 h-16 text-white" />
+                                    <div className="flex items-center gap-2 p-2 bg-white/30 backdrop-blur-sm rounded-full">
+                                      <Timer className="w-8 h-8 text-white" />
+                                      <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
                                     </div>
                                     <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
-                                        {isScanning ? 'Scanning for a clear shot...' : 'Hold steady...'}
+                                        Hold steady...
                                     </p>
                                 </div>
                            </>
@@ -369,7 +364,7 @@ export function BookIntakeFlow() {
                  <CardHeader>
                      <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CONFIRM')}><ChevronLeft /> Back</Button>
                      <CardTitle className="text-3xl font-headline">Step 2: Assess Condition</CardTitle>
-                     <CardDescription>Describe any damage, then show us a picture of it. We'll scan automatically.</CardDescription>
+                     <CardDescription>Describe any damage, then show us a picture of it. We'll take one automatically.</CardDescription>
                  </CardHeader>
                  <CardContent>
                  {step === "ASSESSMENT_LOADING" ? (
@@ -432,11 +427,12 @@ export function BookIntakeFlow() {
                             <>
                                     <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                                     <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
-                                         <div className="p-4 bg-white/30 backdrop-blur-sm rounded-full">
-                                          <ScanLine className="w-16 h-16 text-white" />
+                                        <div className="flex items-center gap-2 p-2 bg-white/30 backdrop-blur-sm rounded-full">
+                                          <Timer className="w-8 h-8 text-white" />
+                                          <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
                                         </div>
                                         <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
-                                            {isScanning ? 'Scanning for a clear shot...' : 'Show any wear, tear, or defining features.'}
+                                            Show any wear, tear, or defining features.
                                         </p>
                                     </div>
                             </>
