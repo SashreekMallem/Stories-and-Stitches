@@ -117,20 +117,25 @@ export function BookIntakeFlow() {
     }
   }, []);
   
-  const resetCamera = useCallback(() => {
+  const stopCameraStream = useCallback(() => {
     if (videoRef.current?.srcObject) {
         const stream = videoRef.current.srcObject as MediaStream;
         stream.getTracks().forEach(track => track.stop());
         videoRef.current.srcObject = null;
     }
+  }, []);
+
+  const resetCameraState = useCallback(() => {
+    stopTimer();
+    stopCameraStream();
     setHasCameraPermission(null);
     setIsCameraReady(false);
     captureTriggeredRef.current = false;
-  }, []);
+  }, [stopTimer, stopCameraStream]);
+
 
   const handleReset = useCallback(() => {
-    stopTimer();
-    resetCamera();
+    resetCameraState();
     setStep("WELCOME");
     setMetadata(null);
     setAssessment(null);
@@ -138,7 +143,7 @@ export function BookIntakeFlow() {
     setConditionImages([]);
     setConditionCaptureStepIndex(0);
     conditionForm.reset();
-  }, [stopTimer, resetCamera, conditionForm]);
+  }, [resetCameraState, conditionForm]);
 
   const captureFrame = useCallback((): string | null => {
     if (videoRef.current && canvasRef.current && isCameraReady) {
@@ -225,48 +230,46 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
   
+  const enableCamera = useCallback(async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        console.error('Camera API not available');
+        setHasCameraPermission(false);
+        return;
+      }
+      resetCameraState();
+      try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+          if (videoRef.current) {
+              videoRef.current.srcObject = stream;
+              videoRef.current.oncanplay = () => setIsCameraReady(true);
+          }
+          setHasCameraPermission(true);
+      } catch (error) {
+          console.error('Error accessing camera:', error);
+          setHasCameraPermission(false);
+          toast({
+              variant: 'destructive',
+              title: 'Camera Access Denied',
+              description: 'Please enable camera permissions in your browser settings to use this feature.',
+          });
+      }
+  }, [resetCameraState, toast]);
+
   // Effect for camera permission & setup
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-    if (!isCaptureStep || !isClient) {
-      if(videoRef.current?.srcObject){
-        resetCamera();
-      }
-      return;
+    if (isCaptureStep && isClient) {
+        enableCamera();
+    } else {
+        stopCameraStream();
     }
-
-    let stream: MediaStream;
-    const enableCamera = async () => {
-        // Always reset camera before enabling
-        resetCamera();
-        try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-            if (videoRef.current) {
-                videoRef.current.srcObject = stream;
-            }
-            setHasCameraPermission(true);
-        } catch (error) {
-            console.error('Error accessing camera:', error);
-            setHasCameraPermission(false);
-            toast({
-                variant: 'destructive',
-                title: 'Camera Access Denied',
-                description: 'Please enable camera permissions in your browser settings to use this feature.',
-            });
-        }
-    };
     
-    enableCamera();
-
-    const videoElement = videoRef.current;
-    const handleCanPlay = () => setIsCameraReady(true);
-    videoElement?.addEventListener('canplay', handleCanPlay);
-
     return () => {
-        videoElement?.removeEventListener('canplay', handleCanPlay);
+        stopCameraStream();
         stopTimer();
     }
-  }, [step, isClient, toast, stopTimer, resetCamera]);
+  }, [step, isClient, enableCamera, stopCameraStream, stopTimer]);
+
 
   // Effect for timer-based capture
   useEffect(() => {
