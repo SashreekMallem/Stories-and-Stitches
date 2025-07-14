@@ -308,6 +308,12 @@ export function BookIntakeFlow() {
       const result = await assessBookCondition({
         photoDataUris: validPhotos,
         description: "User did not provide a description. Assess based on images.",
+        bookTitle: metadata?.title,
+        bookAuthor: metadata?.author,
+        isFirstTimeDonor: false, // TODO: Track user's donation history
+        isThemeEvent: false, // TODO: Check if there's an active theme event
+        isNewBook: false, // TODO: Detect if book is new from photos
+        hasCraftMatch: false, // TODO: Check if book matches available craft kits
       });
       setAssessment(result);
       setStep("ASSESSMENT_CONFIRM");
@@ -710,16 +716,46 @@ export function BookIntakeFlow() {
                             ))}
                         </div>
                       <div className="space-y-2">
-                        <Label>Condition Score: {Math.round(assessment.conditionScore * 100)}%</Label>
-                        <Progress value={assessment.conditionScore * 100} className="h-4"/>
+                        <Label>Condition Score: {Math.round((assessment.conditionScore / 5) * 100)}%</Label>
+                        <Progress value={(assessment.conditionScore / 5) * 100} className="h-4"/>
                       </div>
                       <div className="text-center">
-                        <p className="text-sm text-muted-foreground">Estimated Credit Value</p>
-                        <p className="text-5xl font-bold text-primary">{assessment.creditEstimate} Credits</p>
+                        <p className="text-sm text-muted-foreground">Final Credit Value</p>
+                        <p className="text-5xl font-bold text-primary">{assessment.finalCredits} Credits</p>
                       </div>
                       <div className="space-y-2">
-                        <Label>Justification</Label>
-                        <blockquote className="border-l-2 pl-6 italic text-muted-foreground">"{assessment.justification}"</blockquote>
+                        <Label>Credit Breakdown</Label>
+                        <div className="grid grid-cols-2 gap-2 text-sm">
+                          <div className="flex justify-between">
+                            <span>Condition:</span>
+                            <span>{assessment.creditBreakdown.conditionCredits}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Demand:</span>
+                            <span>{assessment.creditBreakdown.demandCredits}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Rarity:</span>
+                            <span>{assessment.creditBreakdown.rarityCredits}</span>
+                          </div>
+                          <div className="flex justify-between">
+                            <span>Bonus:</span>
+                            <span>{assessment.creditBreakdown.bonusCredits}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <Label>Assessment Details</Label>
+                        <div className="text-sm text-muted-foreground space-y-1">
+                          <div>Cover: {assessment.coverCondition}/10</div>
+                          <div>Spine: {assessment.spineCondition}/10</div>
+                          <div>Pages: {assessment.pagesCondition}/10</div>
+                          <div>Binding: {assessment.bindingIntegrity}/10</div>
+                          <div>Cleanliness: {assessment.cleanliness}/10</div>
+                          {assessment.hasAnnotations && (
+                            <div>Annotations: {assessment.annotationSeverity}</div>
+                          )}
+                        </div>
                       </div>
                     </div>
                 ) : (
@@ -799,7 +835,7 @@ export function BookIntakeFlow() {
             <CardHeader className="items-center gap-4">
               <CheckCircle2 className="w-16 h-16 text-primary" />
               <CardTitle className="text-4xl font-headline">Swap Complete!</CardTitle>
-              <CardDescription className="text-lg">You've earned {assessment?.creditEstimate || 0} credits!</CardDescription>
+              <CardDescription className="text-lg">You've earned {assessment?.finalCredits || 0} credits!</CardDescription>
             </CardHeader>
             <CardContent className="space-y-6">
               <p className="text-muted-foreground">Your credits are ready to use. Browse our selection of craft kits and start creating.</p>
