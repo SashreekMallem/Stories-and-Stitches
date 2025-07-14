@@ -82,6 +82,7 @@ export function BookIntakeFlow() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const timerIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const captureTriggeredRef = useRef<boolean>(false);
 
   const conditionForm = useForm<z.infer<typeof conditionSchema>>({
     resolver: zodResolver(conditionSchema),
@@ -115,15 +116,16 @@ export function BookIntakeFlow() {
       timerIntervalRef.current = null;
     }
   }, []);
-
+  
   const resetCamera = useCallback(() => {
     if (videoRef.current?.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
     }
     setHasCameraPermission(null);
     setIsCameraReady(false);
+    captureTriggeredRef.current = false;
   }, []);
 
   const handleReset = useCallback(() => {
@@ -158,32 +160,50 @@ export function BookIntakeFlow() {
     return null;
   }, [isCameraReady]);
 
-  const handleExtractMetadata = useCallback(async (photoDataUri: string) => {
-    setCapturedImage(photoDataUri);
-    setStep("METADATA_LOADING");
-    try {
-      const result = await extractBookMetadata({ photoDataUri });
-      if (!result.title || !result.author) {
-        toast({
-          variant: "destructive",
-          title: "Extraction Failed",
-          description: "We couldn't read the book details. Please try again with a clear, well-lit photo of the cover.",
-        });
-        setStep("METADATA_CAPTURE");
-      } else {
-        setMetadata(result);
-        setStep("CONDITION_CAPTURE");
-      }
-    } catch (error) {
-      console.error("Metadata extraction error:", error);
-      toast({
-        variant: "destructive",
-        title: "An Error Occurred",
-        description: "Something went wrong. Please try again later.",
-      });
-      setStep("METADATA_CAPTURE");
+  // Effect to handle metadata extraction after image is captured
+  useEffect(() => {
+    if (!capturedImage || step !== 'METADATA_LOADING') {
+      return;
     }
-  }, [toast]);
+
+    let attempts = 0;
+    const maxAttempts = 2;
+
+    const performExtraction = async () => {
+        attempts++;
+        try {
+            const result = await extractBookMetadata({ photoDataUri: capturedImage });
+            if (!result.title || !result.author) {
+                toast({
+                    variant: "destructive",
+                    title: "Extraction Failed",
+                    description: "We couldn't read the book details. Please try again with a clear, well-lit photo of the cover.",
+                });
+                handleReset();
+            } else {
+                setMetadata(result);
+                setStep("CONDITION_CAPTURE");
+            }
+        } catch (error: any) {
+            console.error("Metadata extraction error:", error);
+            const errorMessage = error.toString();
+            if (errorMessage.includes('503') && attempts < maxAttempts) {
+                console.log(`AI service unavailable. Retrying... (Attempt ${attempts})`);
+                setTimeout(performExtraction, 2000); // Wait 2s before retrying
+                return;
+            }
+            toast({
+                variant: "destructive",
+                title: "An Error Occurred",
+                description: "Something went wrong during metadata extraction. Please try again.",
+            });
+            handleReset();
+        }
+    };
+    performExtraction();
+
+  }, [capturedImage, step, toast, handleReset]);
+
 
   const handleAssessCondition = useCallback(async (photos: CapturedImageData[]) => {
     setStep("ASSESSMENT_LOADING");
@@ -249,55 +269,58 @@ export function BookIntakeFlow() {
 
   // Effect for timer-based capture
   useEffect(() => {
-    if (!isCameraReady) {
-        stopTimer();
-        return;
+    if (!isCameraReady || captureTriggeredRef.current) {
+      stopTimer();
+      return;
     }
     
     setCountdown(CAPTURE_DELAY / 1000);
 
     timerIntervalRef.current = setInterval(() => {
-        setCountdown(prev => {
-            if (prev <= 1) {
-                stopTimer();
-                const frame = captureFrame();
-                if (frame) {
-                    if (step === 'METADATA_CAPTURE') {
-                        const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
-                        setConditionImages([initialImage]);
-                        setConditionCaptureStepIndex(1); // Move to the next condition step
-                        handleExtractMetadata(frame);
-                    } else if (step === 'CONDITION_CAPTURE') {
-                        const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
-                        const updatedImages = [...conditionImages, newImage];
-                        setConditionImages(updatedImages);
+      setCountdown(prev => {
+        if (prev <= 1) {
+          stopTimer();
+          captureTriggeredRef.current = true;
+          const frame = captureFrame();
 
-                        if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
-                            setConditionCaptureStepIndex(prevIndex => prevIndex + 1);
-                        } else {
-                            handleAssessCondition(updatedImages);
-                        }
-                    }
-                } else {
-                  // Capture failed, reset to try again
-                  toast({
-                    variant: "destructive",
-                    title: "Capture Failed",
-                    description: "Couldn't get a clear image. Please hold steady and we'll try again.",
-                  });
-                  // Reset timer without changing step
-                  setCountdown(CAPTURE_DELAY / 1000); 
-                }
-                return 0;
+          if (frame) {
+            if (step === 'METADATA_CAPTURE') {
+              const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
+              setConditionImages([initialImage]);
+              setConditionCaptureStepIndex(1);
+              setCapturedImage(frame);
+              setStep('METADATA_LOADING');
+            } else if (step === 'CONDITION_CAPTURE') {
+              const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
+              const updatedImages = [...conditionImages, newImage];
+              setConditionImages(updatedImages);
+
+              if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
+                setConditionCaptureStepIndex(prevIndex => prevIndex + 1);
+                captureTriggeredRef.current = false; // Allow next capture
+              } else {
+                handleAssessCondition(updatedImages);
+              }
             }
-            return prev - 1;
-        });
+          } else {
+            toast({
+              variant: "destructive",
+              title: "Capture Failed",
+              description: "Couldn't get a clear image. Please hold steady and we'll try again.",
+            });
+            captureTriggeredRef.current = false; // Reset to allow retry
+            setCountdown(CAPTURE_DELAY / 1000); 
+          }
+          return 0;
+        }
+        return prev - 1;
+      });
     }, 1000);
 
     return () => {
       stopTimer();
     };
-  }, [isCameraReady, step, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, toast]);
+  }, [isCameraReady, step, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleAssessCondition, toast]);
   
   if (!isClient) {
     return (
@@ -540,5 +563,3 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
-
-    
