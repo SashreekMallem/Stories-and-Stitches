@@ -71,6 +71,7 @@ export function BookIntakeFlow() {
   const [metadata, setMetadata] = useState<ExtractBookMetadataOutput | null>(null);
   const [assessment, setAssessment] = useState<AssessBookConditionOutput | null>(null);
   const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
+  const [isCameraReady, setIsCameraReady] = useState(false);
   const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const [conditionImages, setConditionImages] = useState<CapturedImageData[]>([]);
   const [conditionCaptureStepIndex, setConditionCaptureStepIndex] = useState(0);
@@ -96,7 +97,7 @@ export function BookIntakeFlow() {
     randomPage,
     "Closed book from top",
     "Closed book from bottom",
-    "Closed book from side"
+    "Closed book from side",
   ], [randomPage]);
 
   const currentConditionStepLabel = conditionCaptureSteps[conditionCaptureStepIndex];
@@ -115,25 +116,30 @@ export function BookIntakeFlow() {
     }
   }, []);
 
+  const resetCamera = useCallback(() => {
+    if (videoRef.current?.srcObject) {
+      const stream = videoRef.current.srcObject as MediaStream;
+      stream.getTracks().forEach(track => track.stop());
+      videoRef.current.srcObject = null;
+    }
+    setHasCameraPermission(null);
+    setIsCameraReady(false);
+  }, []);
+
   const handleReset = useCallback(() => {
     stopTimer();
+    resetCamera();
     setStep("WELCOME");
     setMetadata(null);
     setAssessment(null);
     setCapturedImage(null);
     setConditionImages([]);
     setConditionCaptureStepIndex(0);
-    setHasCameraPermission(null);
-    if(videoRef.current?.srcObject){
-        const stream = videoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach(track => track.stop());
-        videoRef.current.srcObject = null;
-    }
     conditionForm.reset();
-  }, [stopTimer, conditionForm]);
+  }, [stopTimer, resetCamera, conditionForm]);
 
   const captureFrame = useCallback((): string | null => {
-    if (videoRef.current && canvasRef.current) {
+    if (videoRef.current && canvasRef.current && isCameraReady) {
       const video = videoRef.current;
       const canvas = canvasRef.current;
       canvas.width = video.videoWidth;
@@ -141,11 +147,16 @@ export function BookIntakeFlow() {
       const context = canvas.getContext('2d');
       if (context) {
         context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        return canvas.toDataURL('image/png');
+        const dataUrl = canvas.toDataURL('image/png');
+        if (dataUrl === 'data:,') {
+          console.error("Captured blank image");
+          return null;
+        }
+        return dataUrl;
       }
     }
     return null;
-  }, []);
+  }, [isCameraReady]);
 
   const handleExtractMetadata = useCallback(async (photoDataUri: string) => {
     setCapturedImage(photoDataUri);
@@ -177,7 +188,6 @@ export function BookIntakeFlow() {
   const handleAssessCondition = useCallback(async (photos: CapturedImageData[]) => {
     setStep("ASSESSMENT_LOADING");
     try {
-      // Pass an empty string for description as it's no longer used
       const result = await assessBookCondition({
         photoDataUris: photos,
         description: "User did not provide a description. Assess based on images.",
@@ -195,15 +205,21 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
   
-  // Effect for camera permission
+  // Effect for camera permission & setup
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
-    if (!isCaptureStep || !isClient) return;
+    if (!isCaptureStep || !isClient) {
+      if(videoRef.current?.srcObject){
+        resetCamera();
+      }
+      return;
+    }
 
     let stream: MediaStream;
     const enableCamera = async () => {
+        if (hasCameraPermission === true) return;
         try {
-            stream = await navigator.mediaDevices.getUserMedia({ video: true });
+            stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
             if (videoRef.current) {
                 videoRef.current.srcObject = stream;
             }
@@ -219,27 +235,25 @@ export function BookIntakeFlow() {
         }
     };
     
-    if (!videoRef.current?.srcObject) {
-       enableCamera();
-    }
+    enableCamera();
+
+    const videoElement = videoRef.current;
+    const handleCanPlay = () => setIsCameraReady(true);
+    videoElement?.addEventListener('canplay', handleCanPlay);
 
     return () => {
+        videoElement?.removeEventListener('canplay', handleCanPlay);
         stopTimer();
     }
-  }, [step, toast, stopTimer, isClient]);
+  }, [step, isClient, hasCameraPermission, toast, stopTimer, resetCamera]);
 
   // Effect for timer-based capture
   useEffect(() => {
-    const isMetadataCapture = step === 'METADATA_CAPTURE';
-    const isConditionCapture = step === 'CONDITION_CAPTURE';
-    const canStartTimer = hasCameraPermission && (isMetadataCapture || (isConditionCapture && isConditionDescriptionValid));
-
-    if (!canStartTimer) {
+    if (!isCameraReady) {
         stopTimer();
-        setCountdown(CAPTURE_DELAY / 1000);
         return;
     }
-
+    
     setCountdown(CAPTURE_DELAY / 1000);
 
     timerIntervalRef.current = setInterval(() => {
@@ -248,13 +262,12 @@ export function BookIntakeFlow() {
                 stopTimer();
                 const frame = captureFrame();
                 if (frame) {
-                    if (isMetadataCapture) {
-                         // For metadata, we also need to add it to our list of condition images
+                    if (step === 'METADATA_CAPTURE') {
                         const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
                         setConditionImages([initialImage]);
                         setConditionCaptureStepIndex(1); // Move to the next condition step
                         handleExtractMetadata(frame);
-                    } else if (isConditionCapture) {
+                    } else if (step === 'CONDITION_CAPTURE') {
                         const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
                         const updatedImages = [...conditionImages, newImage];
                         setConditionImages(updatedImages);
@@ -265,6 +278,15 @@ export function BookIntakeFlow() {
                             handleAssessCondition(updatedImages);
                         }
                     }
+                } else {
+                  // Capture failed, reset to try again
+                  toast({
+                    variant: "destructive",
+                    title: "Capture Failed",
+                    description: "Couldn't get a clear image. Please hold steady and we'll try again.",
+                  });
+                  // Reset timer without changing step
+                  setCountdown(CAPTURE_DELAY / 1000); 
                 }
                 return 0;
             }
@@ -275,7 +297,7 @@ export function BookIntakeFlow() {
     return () => {
       stopTimer();
     };
-  }, [step, hasCameraPermission, isConditionDescriptionValid, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition]);
+  }, [isCameraReady, step, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleExtractMetadata, handleAssessCondition, toast]);
   
   if (!isClient) {
     return (
@@ -307,7 +329,7 @@ export function BookIntakeFlow() {
               <p className="text-muted-foreground">Ready to start your next creative journey? Deposit a book you've loved to earn credits for exciting craft kits.</p>
             </CardContent>
             <CardFooter>
-              <Button className="w-full text-lg py-6" onClick={() => setStep("METADATA_CAPTURE")}>
+              <Button className="w-full text-lg py-6" onClick={() => { setIsCameraReady(false); setStep("METADATA_CAPTURE"); }}>
                 Start Swapping
               </Button>
             </CardFooter>
@@ -331,6 +353,7 @@ export function BookIntakeFlow() {
                     </div>
                 ) : (
                     <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
+                        <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                         {hasCameraPermission === false ? (
                             <Alert variant="destructive" className="m-4">
                                 <AlertTriangle className="h-4 w-4" />
@@ -339,15 +362,10 @@ export function BookIntakeFlow() {
                                 Please enable camera permissions in your browser settings to use this feature.
                                 </AlertDescription>
                             </Alert>
-                        ) : hasCameraPermission === null ? (
-                            <div className="flex flex-col items-center gap-2">
-                                <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                                <p className="text-muted-foreground">Requesting camera...</p>
-                            </div>
                         ) : (
-                           <>
-                                <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
-                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
+                           <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
+                                {isCameraReady ? (
+                                  <>
                                     <div className="flex items-center gap-2 p-2 bg-white/30 backdrop-blur-sm rounded-full">
                                       <Timer className="w-8 h-8 text-white" />
                                       <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
@@ -355,8 +373,14 @@ export function BookIntakeFlow() {
                                     <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
                                         Hold steady...
                                     </p>
-                                </div>
-                           </>
+                                  </>
+                                ) : (
+                                  <div className="flex flex-col items-center gap-2">
+                                      <Loader2 className="w-8 h-8 animate-spin text-white" />
+                                      <p className="text-white">Initializing camera...</p>
+                                  </div>
+                                )}
+                           </div>
                         )}
                     </div>
                 )}
@@ -430,6 +454,7 @@ export function BookIntakeFlow() {
                             </div>
                         )}
                         <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
+                             <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
                              {hasCameraPermission === false ? (
                                 <Alert variant="destructive" className="m-4">
                                     <AlertTriangle className="h-4 w-4" />
@@ -438,24 +463,25 @@ export function BookIntakeFlow() {
                                     Please enable camera permissions in your browser settings to use this feature.
                                     </AlertDescription>
                                 </Alert>
-                            ) : hasCameraPermission === null ? (
-                                <div className="flex flex-col items-center gap-2">
-                                    <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
-                                    <p className="text-muted-foreground">Requesting camera...</p>
-                                </div>
                             ) : (
-                            <>
-                                    <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
-                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
-                                        <div className="flex items-center gap-2 p-2 bg-white/30 backdrop-blur-sm rounded-full">
-                                          <Timer className="w-8 h-8 text-white" />
-                                          <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
-                                        </div>
-                                        <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
-                                           Next: <span className="font-bold">{currentConditionStepLabel}</span>
-                                        </p>
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40">
+                                {isCameraReady ? (
+                                <>
+                                    <div className="flex items-center gap-2 p-2 bg-white/30 backdrop-blur-sm rounded-full">
+                                      <Timer className="w-8 h-8 text-white" />
+                                      <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
                                     </div>
-                            </>
+                                    <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
+                                       Next: <span className="font-bold">{currentConditionStepLabel}</span>
+                                    </p>
+                                </>
+                                ) : (
+                                    <div className="flex flex-col items-center gap-2">
+                                        <Loader2 className="w-8 h-8 animate-spin text-white" />
+                                        <p className="text-white">Initializing camera...</p>
+                                    </div>
+                                )}
+                            </div>
                             )}
                         </div>
                         <div>
