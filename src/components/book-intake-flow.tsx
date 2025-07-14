@@ -1,6 +1,7 @@
+
 "use client";
 
-import { useState } from "react";
+import { useState, useRef, useEffect } from "react";
 import Image from "next/image";
 import {
   BookHeart,
@@ -9,6 +10,7 @@ import {
   ChevronLeft,
   Loader2,
   RefreshCw,
+  AlertTriangle,
 } from "lucide-react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -40,6 +42,8 @@ import { extractBookMetadata } from "@/ai/flows/extract-book-metadata";
 import type { ExtractBookMetadataOutput } from "@/ai/flows/extract-book-metadata";
 import { assessBookCondition } from "@/ai/flows/assess-book-condition";
 import type { AssessBookConditionOutput } from "@/ai/flows/assess-book-condition";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+
 
 type Step =
   | "WELCOME"
@@ -50,9 +54,6 @@ type Step =
   | "ASSESSMENT_LOADING"
   | "ASSESSMENT_CONFIRM"
   | "SUCCESS";
-
-const FAKE_IMAGE_DATA_URI =
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
 
 const conditionSchema = z.object({
   description: z
@@ -65,7 +66,52 @@ export function BookIntakeFlow() {
   const [step, setStep] = useState<Step>("WELCOME");
   const [metadata, setMetadata] = useState<ExtractBookMetadataOutput | null>(null);
   const [assessment, setAssessment] = useState<AssessBookConditionOutput | null>(null);
+  const [hasCameraPermission, setHasCameraPermission] = useState<boolean | null>(null);
+  const [capturedImage, setCapturedImage] = useState<string | null>(null);
   const { toast } = useToast();
+  
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+
+  useEffect(() => {
+    const getCameraPermission = async () => {
+      if (step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE') {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          setHasCameraPermission(true);
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+          }
+        } catch (error) {
+          console.error('Error accessing camera:', error);
+          setHasCameraPermission(false);
+          toast({
+            variant: 'destructive',
+            title: 'Camera Access Denied',
+            description: 'Please enable camera permissions in your browser settings to use this feature.',
+          });
+        }
+      } else {
+        // Stop camera when not on a capture step
+        if (videoRef.current && videoRef.current.srcObject) {
+            const stream = videoRef.current.srcObject as MediaStream;
+            stream.getTracks().forEach(track => track.stop());
+            videoRef.current.srcObject = null;
+        }
+      }
+    };
+
+    getCameraPermission();
+    
+    // Cleanup function
+    return () => {
+        if (videoRef.current && videoRef.current.srcObject) {
+            const stream = videoRef.current.srcObject as MediaStream;
+            stream.getTracks().forEach(track => track.stop());
+        }
+    }
+  }, [step, toast]);
+
 
   const form = useForm<z.infer<typeof conditionSchema>>({
     resolver: zodResolver(conditionSchema),
@@ -76,13 +122,39 @@ export function BookIntakeFlow() {
     setStep("WELCOME");
     setMetadata(null);
     setAssessment(null);
+    setCapturedImage(null);
     form.reset();
   };
+  
+  const captureFrame = (): string | null => {
+    if (videoRef.current && canvasRef.current) {
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const context = canvas.getContext('2d');
+      if (context) {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        return canvas.toDataURL('image/png');
+      }
+    }
+    return null;
+  }
 
   const handleExtractMetadata = async () => {
+    const photoDataUri = captureFrame();
+    if (!photoDataUri) {
+        toast({
+            variant: "destructive",
+            title: "Capture Failed",
+            description: "Could not capture an image from the camera. Please ensure permissions are granted and the camera is working.",
+        });
+        return;
+    }
+    setCapturedImage(photoDataUri);
     setStep("METADATA_LOADING");
     try {
-      const result = await extractBookMetadata({ photoDataUri: FAKE_IMAGE_DATA_URI });
+      const result = await extractBookMetadata({ photoDataUri });
       if (!result.title || !result.author) {
         toast({
           variant: "destructive",
@@ -106,10 +178,20 @@ export function BookIntakeFlow() {
   };
 
   const handleAssessCondition = async (values: z.infer<typeof conditionSchema>) => {
+    const photoDataUri = captureFrame();
+     if (!photoDataUri) {
+        toast({
+            variant: "destructive",
+            title: "Capture Failed",
+            description: "Could not capture an image from the camera.",
+        });
+        return;
+    }
+    setCapturedImage(photoDataUri);
     setStep("ASSESSMENT_LOADING");
     try {
       const result = await assessBookCondition({
-        photoDataUri: FAKE_IMAGE_DATA_URI,
+        photoDataUri,
         description: values.description,
       });
       setAssessment(result);
@@ -156,6 +238,7 @@ export function BookIntakeFlow() {
                     <CardDescription>Let's find out which book you're swapping.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col items-center gap-6">
+                 <canvas ref={canvasRef} className="hidden" />
                 {step === "METADATA_LOADING" ? (
                     <div className="flex flex-col items-center justify-center h-64 gap-4">
                         <Loader2 className="w-12 h-12 text-primary animate-spin" />
@@ -163,7 +246,7 @@ export function BookIntakeFlow() {
                     </div>
                 ) : step === "METADATA_CONFIRM" && metadata ? (
                     <div className="w-full flex flex-col items-center gap-4">
-                        <Image src="https://placehold.co/300x400.png" alt="Book Cover" width={150} height={200} className="rounded-md shadow-md" data-ai-hint="book cover"/>
+                        <Image src={capturedImage || "https://placehold.co/300x400.png"} alt="Book Cover" width={150} height={200} className="rounded-md shadow-md" data-ai-hint="book cover"/>
                         <div className="w-full space-y-2">
                             <Label htmlFor="title">Title</Label>
                             <Input id="title" value={metadata.title} readOnly />
@@ -174,24 +257,47 @@ export function BookIntakeFlow() {
                         </div>
                     </div>
                 ) : (
-                    <div className="w-full flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-lg h-64 gap-4 bg-muted/20">
-                        <Camera className="w-16 h-16 text-muted-foreground" />
-                        <p className="text-center text-muted-foreground">
-                        Place your book cover in front of the camera and press scan.
-                        </p>
+                    <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
+                        {hasCameraPermission === false ? (
+                            <Alert variant="destructive" className="m-4">
+                                <AlertTriangle className="h-4 w-4" />
+                                <AlertTitle>Camera Access Denied</AlertTitle>
+                                <AlertDescription>
+                                Please enable camera permissions in your browser settings to use this feature.
+                                </AlertDescription>
+                            </Alert>
+                        ) : hasCameraPermission === null ? (
+                            <div className="flex flex-col items-center gap-2">
+                                <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+                                <p className="text-muted-foreground">Requesting camera...</p>
+                            </div>
+                        ) : (
+                           <>
+                                <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
+                                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/20">
+                                    <Camera className="w-16 h-16 text-white/50" />
+                                    <p className="text-center text-white/80 mt-2 font-medium">
+                                        Position your book cover in the frame.
+                                    </p>
+                                </div>
+                           </>
+                        )}
                     </div>
                 )}
                 </CardContent>
                 <CardFooter className="flex justify-between">
                 {step === "METADATA_CONFIRM" ? (
                     <>
-                        <Button variant="outline" onClick={() => setStep("METADATA_CAPTURE")}><RefreshCw className="mr-2" /> Try Again</Button>
+                        <Button variant="outline" onClick={() => { setCapturedImage(null); setStep("METADATA_CAPTURE"); }}><RefreshCw className="mr-2" /> Try Again</Button>
                         <Button onClick={() => setStep("CONDITION_CAPTURE")}>Looks Good</Button>
                     </>
                 ) : (
                     <>
                         <Button variant="ghost" onClick={handleReset}>Cancel</Button>
-                        <Button onClick={handleExtractMetadata} disabled={step === "METADATA_LOADING"}>Scan Book Cover</Button>
+                        <Button onClick={handleExtractMetadata} disabled={step === "METADATA_LOADING" || !hasCameraPermission}>
+                            {step === "METADATA_LOADING" ? <Loader2 className="animate-spin" /> : <Camera />}
+                            Scan Book Cover
+                        </Button>
                     </>
                 )}
                 </CardFooter>
@@ -216,6 +322,7 @@ export function BookIntakeFlow() {
                     </div>
                 ) : step === "ASSESSMENT_CONFIRM" && assessment ? (
                     <div className="space-y-6">
+                       {capturedImage && <Image src={capturedImage} alt="Book Condition" width={150} height={200} className="rounded-md shadow-md mx-auto" data-ai-hint="book damage"/>}
                       <div className="space-y-2">
                         <Label>Condition Score: {Math.round(assessment.conditionScore * 100)}%</Label>
                         <Progress value={assessment.conditionScore * 100} className="h-4"/>
@@ -232,11 +339,31 @@ export function BookIntakeFlow() {
                 ) : (
                     <Form {...form}>
                       <form onSubmit={form.handleSubmit(handleAssessCondition)} className="space-y-6">
-                        <div className="w-full flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-lg h-64 gap-4 bg-muted/20">
-                            <Camera className="w-16 h-16 text-muted-foreground" />
-                            <p className="text-center text-muted-foreground">
-                            Take a photo of any wear, tear, or defining features.
-                            </p>
+                        <div className="w-full aspect-video flex flex-col items-center justify-center p-0 border-2 border-dashed rounded-lg gap-4 bg-muted/20 relative">
+                             {hasCameraPermission === false ? (
+                                <Alert variant="destructive" className="m-4">
+                                    <AlertTriangle className="h-4 w-4" />
+                                    <AlertTitle>Camera Access Denied</AlertTitle>
+                                    <AlertDescription>
+                                    Please enable camera permissions in your browser settings to use this feature.
+                                    </AlertDescription>
+                                </Alert>
+                            ) : hasCameraPermission === null ? (
+                                <div className="flex flex-col items-center gap-2">
+                                    <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+                                    <p className="text-muted-foreground">Requesting camera...</p>
+                                </div>
+                            ) : (
+                            <>
+                                    <video ref={videoRef} className="w-full h-full object-cover rounded-md" autoPlay muted playsInline />
+                                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/20">
+                                        <Camera className="w-16 h-16 text-white/50" />
+                                        <p className="text-center text-white/80 mt-2 font-medium">
+                                            Show any wear, tear, or defining features.
+                                        </p>
+                                    </div>
+                            </>
+                            )}
                         </div>
                          <FormField
                             control={form.control}
@@ -258,11 +385,12 @@ export function BookIntakeFlow() {
                  <CardFooter className="flex justify-between">
                      {step === 'ASSESSMENT_CONFIRM' ? (
                         <>
-                            <Button variant="outline" onClick={handleReset}>Cancel</Button>
+                            <Button variant="outline" onClick={() => setStep('CONDITION_CAPTURE')}>Try Again</Button>
                             <Button onClick={() => setStep('SUCCESS')}>Deposit & Get Credits</Button>
                         </>
                      ) : (
-                        <Button className="w-full" type="submit" onClick={form.handleSubmit(handleAssessCondition)} disabled={step === "ASSESSMENT_LOADING"}>
+                        <Button className="w-full" type="submit" onClick={form.handleSubmit(handleAssessCondition)} disabled={step === "ASSESSMENT_LOADING" || !hasCameraPermission}>
+                            {step === "ASSESSMENT_LOADING" ? <Loader2 className="animate-spin" /> : <Camera />}
                             Estimate Credit
                         </Button>
                      )}
