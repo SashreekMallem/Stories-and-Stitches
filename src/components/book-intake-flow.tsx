@@ -231,29 +231,24 @@ export function BookIntakeFlow() {
   }, [toast]);
   
   const enableCamera = useCallback(async () => {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        console.error('Camera API not available');
+    if (!navigator.mediaDevices?.getUserMedia) {
+      console.error('Camera API not available');
+      setHasCameraPermission(false);
+      return;
+    }
+    resetCameraState();
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+            videoRef.current.oncanplay = () => setIsCameraReady(true);
+        }
+        setHasCameraPermission(true);
+    } catch (error) {
+        console.error('Error accessing camera:', error);
         setHasCameraPermission(false);
-        return;
-      }
-      resetCameraState();
-      try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-          if (videoRef.current) {
-              videoRef.current.srcObject = stream;
-              videoRef.current.oncanplay = () => setIsCameraReady(true);
-          }
-          setHasCameraPermission(true);
-      } catch (error) {
-          console.error('Error accessing camera:', error);
-          setHasCameraPermission(false);
-          toast({
-              variant: 'destructive',
-              title: 'Camera Access Denied',
-              description: 'Please enable camera permissions in your browser settings to use this feature.',
-          });
-      }
-  }, [resetCameraState, toast]);
+    }
+  }, [resetCameraState]);
 
   // Effect for camera permission & setup
   useEffect(() => {
@@ -269,6 +264,16 @@ export function BookIntakeFlow() {
         stopTimer();
     }
   }, [step, isClient, enableCamera, stopCameraStream, stopTimer]);
+
+  useEffect(() => {
+    if (hasCameraPermission === false) {
+      toast({
+          variant: 'destructive',
+          title: 'Camera Access Denied',
+          description: 'Please enable camera permissions in your browser settings to use this feature.',
+      });
+    }
+  }, [hasCameraPermission, toast])
 
 
   // Effect for timer-based capture
@@ -567,3 +572,5 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
+
+    
