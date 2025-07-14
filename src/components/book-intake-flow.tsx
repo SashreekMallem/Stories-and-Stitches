@@ -133,7 +133,7 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
 
-  const handleAssessCondition = useCallback(async (values: z.infer<typeof conditionSchema>) => {
+  const handleAssessCondition = useCallback(async (description: string) => {
     const photoDataUri = captureFrame();
      if (!photoDataUri) {
         toast({
@@ -148,7 +148,7 @@ export function BookIntakeFlow() {
     try {
       const result = await assessBookCondition({
         photoDataUri,
-        description: values.description,
+        description,
       });
       setAssessment(result);
       setStep("ASSESSMENT_CONFIRM");
@@ -171,12 +171,15 @@ export function BookIntakeFlow() {
     setIsScanning(false);
   }, []);
   
+  // Effect for camera permission and stream management
   useEffect(() => {
     const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
+    let stream: MediaStream | null = null;
+
     if (isCaptureStep && hasCameraPermission === null) {
       (async () => {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          stream = await navigator.mediaDevices.getUserMedia({ video: true });
           if (videoRef.current) {
             videoRef.current.srcObject = stream;
           }
@@ -193,13 +196,17 @@ export function BookIntakeFlow() {
       })();
     }
 
-    if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
-      const stream = videoRef.current.srcObject as MediaStream;
-      stream.getTracks().forEach(track => track.stop());
-      videoRef.current.srcObject = null;
+    return () => {
+      if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
+        const mediaStream = videoRef.current.srcObject as MediaStream;
+        mediaStream.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+      }
     }
   }, [step, hasCameraPermission, toast]);
 
+
+  // Effect for smart scanning logic
   useEffect(() => {
     const startScanning = async (scanType: 'metadata' | 'condition') => {
       if (isScanning || !hasCameraPermission) return;
@@ -217,7 +224,8 @@ export function BookIntakeFlow() {
             if (scanType === 'metadata') {
               await handleExtractMetadata(frame);
             } else if (scanType === 'condition') {
-              await handleAssessCondition(conditionForm.getValues());
+              const description = conditionForm.getValues('description');
+              await handleAssessCondition(description);
             }
           }
         } catch (error) {
@@ -487,5 +495,3 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
-
-    
