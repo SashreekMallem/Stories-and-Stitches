@@ -1,4 +1,3 @@
-
 "use client";
 
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
@@ -77,7 +76,12 @@ export function BookIntakeFlow() {
   const [conditionCaptureStepIndex, setConditionCaptureStepIndex] = useState(0);
   const [countdown, setCountdown] = useState(CAPTURE_DELAY / 1000);
   const [isClient, setIsClient] = useState(false);
+  const [captureInProgress, setCaptureInProgress] = useState(false);
   const { toast } = useToast();
+  
+  // Create refs for stable function references
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
   
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -93,12 +97,12 @@ export function BookIntakeFlow() {
 
   const conditionCaptureSteps = useMemo(() => [
     "Front Cover",
-    "Back Cover",
+    "Back Cover", 
+    "Closed book from top",
+    "Closed book from side",
+    "Closed book from bottom",
     "Spine",
     randomPage,
-    "Closed book from top",
-    "Closed book from bottom",
-    "Closed book from side",
   ], [randomPage]);
 
   const currentConditionStepLabel = conditionCaptureSteps[conditionCaptureStepIndex];
@@ -131,6 +135,7 @@ export function BookIntakeFlow() {
     setHasCameraPermission(null);
     setIsCameraReady(false);
     captureTriggeredRef.current = false;
+    setCaptureInProgress(false);
   }, [stopTimer, stopCameraStream]);
 
 
@@ -146,23 +151,62 @@ export function BookIntakeFlow() {
   }, [resetCameraState, conditionForm]);
 
   const captureFrame = useCallback((): string | null => {
-    if (videoRef.current && canvasRef.current && isCameraReady) {
+    try {
+      console.log('captureFrame called - checking requirements:', {
+        hasVideo: !!videoRef.current,
+        hasCanvas: !!canvasRef.current,
+        isCameraReady,
+        videoSrcObject: !!videoRef.current?.srcObject,
+        videoReadyState: videoRef.current?.readyState,
+        videoWidth: videoRef.current?.videoWidth,
+        videoHeight: videoRef.current?.videoHeight,
+        canvasElement: canvasRef.current
+      });
+      
+      if (!videoRef.current || !canvasRef.current || !isCameraReady) {
+        console.error("Missing requirements for capture:", {
+          hasVideo: !!videoRef.current,
+          hasCanvas: !!canvasRef.current,
+          isCameraReady,
+          canvasElement: canvasRef.current
+        });
+        return null;
+      }
+
       const video = videoRef.current;
       const canvas = canvasRef.current;
+      
+      if (!video.videoWidth || !video.videoHeight) {
+        console.error("Video has no dimensions");
+        return null;
+      }
+      
+      console.log('Capturing frame with dimensions:', { width: video.videoWidth, height: video.videoHeight });
+      
       canvas.width = video.videoWidth;
       canvas.height = video.videoHeight;
+      
       const context = canvas.getContext('2d');
-      if (context) {
-        context.drawImage(video, 0, 0, canvas.width, canvas.height);
-        const dataUrl = canvas.toDataURL('image/png');
-        if (dataUrl === 'data:,') {
-          console.error("Captured blank image");
-          return null;
-        }
-        return dataUrl;
+      if (!context) {
+        console.error("Could not get canvas context");
+        return null;
       }
+      
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const dataUrl = canvas.toDataURL('image/png');
+      
+      if (!dataUrl || dataUrl === 'data:,' || dataUrl.length < 100) {
+        console.error("Invalid image captured");
+        return null;
+      }
+      
+      console.log('Successfully captured frame');
+      return dataUrl;
+      
+    } catch (error) {
+      console.error('Error in captureFrame:', error);
+      return null;
     }
-    return null;
   }, [isCameraReady]);
 
   // Effect to handle metadata extraction after image is captured
@@ -171,66 +215,115 @@ export function BookIntakeFlow() {
       return;
     }
 
+    let isCancelled = false;
     let attempts = 0;
     const maxAttempts = 2;
 
     const performExtraction = async () => {
+        if (isCancelled) return;
+        
         attempts++;
         try {
             const result = await extractBookMetadata({ photoDataUri: capturedImage });
+            if (isCancelled) return;
+            
             if (!result.title || !result.author) {
-                toast({
+                toastRef.current({
                     variant: "destructive",
                     title: "Extraction Failed",
                     description: "We couldn't read the book details. Please try again with a clear, well-lit photo of the cover.",
                 });
-                handleReset();
+                // Use setTimeout to prevent state update during render
+                setTimeout(() => {
+                    resetCameraState();
+                    setStep("WELCOME");
+                    setMetadata(null);
+                    setAssessment(null);
+                    setCapturedImage(null);
+                    setConditionImages([]);
+                    setConditionCaptureStepIndex(0);
+                    conditionForm.reset();
+                }, 0);
             } else {
                 setMetadata(result);
                 setStep("CONDITION_CAPTURE");
             }
         } catch (error: any) {
+            if (isCancelled) return;
+            
             console.error("Metadata extraction error:", error);
             const errorMessage = error.toString();
             if (errorMessage.includes('503') && attempts < maxAttempts) {
                 console.log(`AI service unavailable. Retrying... (Attempt ${attempts})`);
-                setTimeout(performExtraction, 2000); // Wait 2s before retrying
+                setTimeout(() => {
+                    if (!isCancelled) performExtraction();
+                }, 2000);
                 return;
             }
-            toast({
+            toastRef.current({
                 variant: "destructive",
                 title: "An Error Occurred",
                 description: "Something went wrong during metadata extraction. Please try again.",
             });
-            handleReset();
+            // Use setTimeout to prevent state update during render
+            setTimeout(() => {
+                resetCameraState();
+                setStep("WELCOME");
+                setMetadata(null);
+                setAssessment(null);
+                setCapturedImage(null);
+                setConditionImages([]);
+                setConditionCaptureStepIndex(0);
+                conditionForm.reset();
+            }, 0);
         }
     };
+    
     performExtraction();
+    
+    // Cleanup function to cancel ongoing operations
+    return () => {
+      isCancelled = true;
+    };
 
-  }, [capturedImage, step, toast, handleReset]);
+  }, [capturedImage, step, resetCameraState, conditionForm]);
 
 
   const handleAssessCondition = useCallback(async (photos: CapturedImageData[]) => {
     setStep("ASSESSMENT_LOADING");
     try {
+      // Validate that all photos have required properties
+      const validPhotos = photos.filter(photo => photo.label && photo.dataUri);
+      console.log('Photos validation:', {
+        totalPhotos: photos.length,
+        validPhotos: validPhotos.length,
+        invalidPhotos: photos.filter(photo => !photo.label || !photo.dataUri),
+        allLabels: photos.map(photo => photo.label)
+      });
+      
+      if (validPhotos.length !== photos.length) {
+        throw new Error(`Invalid photos detected. Expected ${photos.length}, got ${validPhotos.length} valid photos.`);
+      }
+      
       const result = await assessBookCondition({
-        photoDataUris: photos,
+        photoDataUris: validPhotos,
         description: "User did not provide a description. Assess based on images.",
       });
       setAssessment(result);
       setStep("ASSESSMENT_CONFIRM");
     } catch (error) {
       console.error("Condition assessment error:", error);
-      toast({
+      toastRef.current({
         variant: "destructive",
         title: "An Error Occurred",
         description: "Something went wrong. Please try again later.",
       });
       setStep("CONDITION_CAPTURE");
     }
-  }, [toast]);
+  }, []);
   
   const enableCamera = useCallback(async () => {
+    console.log('enableCamera called');
     if (!navigator.mediaDevices?.getUserMedia) {
       console.error('Camera API not available');
       setHasCameraPermission(false);
@@ -238,12 +331,56 @@ export function BookIntakeFlow() {
     }
     resetCameraState();
     try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        console.log('Requesting camera access...');
+        const stream = await navigator.mediaDevices.getUserMedia({ 
+          video: { 
+            facingMode: "environment",
+            width: { ideal: 1280 },
+            height: { ideal: 720 }
+          } 
+        });
+        console.log('Camera access granted, setting up video stream');
         if (videoRef.current) {
             videoRef.current.srcObject = stream;
-            videoRef.current.oncanplay = () => setIsCameraReady(true);
+            
+            // Wait for video to be ready
+            const video = videoRef.current;
+            
+            video.onloadedmetadata = () => {
+              console.log('Video metadata loaded:', {
+                videoWidth: video.videoWidth,
+                videoHeight: video.videoHeight,
+                readyState: video.readyState
+              });
+            };
+            
+            video.oncanplay = () => {
+              console.log('Video can play, checking if ready...');
+              // Additional check to ensure video has dimensions
+              if (video.videoWidth > 0 && video.videoHeight > 0) {
+                console.log('Video dimensions confirmed, setting camera ready');
+                setIsCameraReady(true);
+              } else {
+                console.log('Video can play but no dimensions yet, waiting...');
+                // Wait a bit more for dimensions
+                setTimeout(() => {
+                  if (video.videoWidth > 0 && video.videoHeight > 0) {
+                    console.log('Video dimensions confirmed after delay, setting camera ready');
+                    setIsCameraReady(true);
+                  } else {
+                    console.error('Video still has no dimensions after delay');
+                  }
+                }, 500);
+              }
+            };
+            
+            video.onerror = (error) => {
+              console.error('Video error:', error);
+              setHasCameraPermission(false);
+            };
         }
         setHasCameraPermission(true);
+        console.log('Camera permission set to true');
     } catch (error) {
         console.error('Error accessing camera:', error);
         setHasCameraPermission(false);
@@ -267,58 +404,132 @@ export function BookIntakeFlow() {
 
   useEffect(() => {
     if (hasCameraPermission === false) {
-      toast({
+      // Use setTimeout to defer toast call outside of render cycle
+      setTimeout(() => {
+        toastRef.current({
           variant: 'destructive',
           title: 'Camera Access Denied',
           description: 'Please enable camera permissions in your browser settings to use this feature.',
-      });
+        });
+      }, 0);
     }
-  }, [hasCameraPermission, toast])
+  }, [hasCameraPermission])
 
 
-  // Effect for timer-based capture
+  // Effect for timer-based capture - SIMPLIFIED TO USE SAME LOGIC FOR ALL STEPS
   useEffect(() => {
+    console.log('Timer effect triggered:', { isCameraReady, captureTriggered: captureTriggeredRef.current, step });
+    
     if (!isCameraReady || captureTriggeredRef.current) {
+      console.log('Stopping timer due to conditions:', { isCameraReady, captureTriggered: captureTriggeredRef.current });
       stopTimer();
       return;
     }
     
+    console.log('Starting new countdown timer for step:', step);
     setCountdown(CAPTURE_DELAY / 1000);
 
     timerIntervalRef.current = setInterval(() => {
       setCountdown(prev => {
         if (prev <= 1) {
+          console.log('Timer reached 0, attempting capture for step:', step);
+          
+          // Prevent multiple simultaneous captures
+          if (captureTriggeredRef.current || captureInProgress) {
+            console.log('Capture already in progress, skipping');
+            return 0;
+          }
+          
           stopTimer();
           captureTriggeredRef.current = true;
-          const frame = captureFrame();
+          setCaptureInProgress(true);
+          
+          try {
+            const frame = captureFrame();
+            console.log('Captured frame result:', { hasFrame: !!frame, frameLength: frame?.length });
 
-          if (frame) {
-            if (step === 'METADATA_CAPTURE') {
-              const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
-              setConditionImages([initialImage]);
-              setConditionCaptureStepIndex(1);
-              setCapturedImage(frame);
-              setStep('METADATA_LOADING');
-            } else if (step === 'CONDITION_CAPTURE') {
-              const newImage: CapturedImageData = { label: currentConditionStepLabel, dataUri: frame };
-              const updatedImages = [...conditionImages, newImage];
-              setConditionImages(updatedImages);
-
-              if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
-                setConditionCaptureStepIndex(prevIndex => prevIndex + 1);
-                captureTriggeredRef.current = false; // Allow next capture
-              } else {
-                handleAssessCondition(updatedImages);
+            if (frame) {
+              console.log('Frame captured successfully, processing for step:', step);
+              
+              if (step === 'METADATA_CAPTURE') {
+                // Step 1: Book identification
+                console.log('Processing metadata capture');
+                // Store the front cover image for both metadata AND condition assessment
+                const initialImage: CapturedImageData = { 
+                  label: conditionCaptureSteps[0], // "Front Cover"
+                  dataUri: frame
+                };
+                setConditionImages([initialImage]);
+                setConditionCaptureStepIndex(1); // Start condition capture from "Back Cover" (index 1)
+                setCapturedImage(frame);
+                setStep('METADATA_LOADING');
+                
+              } else if (step === 'CONDITION_CAPTURE') {
+                // Step 2: Condition assessment - SAME LOGIC AS STEP 1
+                console.log('Processing condition capture, current index:', conditionCaptureStepIndex);
+                const currentStepLabel = conditionCaptureSteps[conditionCaptureStepIndex];
+                const newImage: CapturedImageData = { 
+                  label: currentStepLabel, 
+                  dataUri: frame
+                };
+                
+                console.log('Created new image:', {
+                  label: newImage.label,
+                  hasDataUri: !!newImage.dataUri,
+                  dataUriLength: newImage.dataUri?.length
+                });
+                
+                setConditionImages(prev => {
+                  const updatedImages = [...prev, newImage];
+                  console.log('Updated images array:', updatedImages.map(img => img.label));
+                  // Check if we need more images
+                  if (conditionCaptureStepIndex < conditionCaptureSteps.length - 1) {
+                    console.log('Need more images, moving to next step');
+                    setConditionCaptureStepIndex(prevIndex => {
+                      // Reset countdown and capture trigger for next step
+                      setCountdown(CAPTURE_DELAY / 1000);
+                      captureTriggeredRef.current = false;
+                      setCaptureInProgress(false);
+                      return prevIndex + 1;
+                    });
+                  } else {
+                    console.log('All images captured, starting assessment');
+                    setCaptureInProgress(false);
+                    setTimeout(() => {
+                      handleAssessCondition(updatedImages);
+                    }, 0);
+                  }
+                  return updatedImages;
+                });
               }
+            } else {
+              console.log('Capture failed - no frame, retrying');
+              setCaptureInProgress(false);
+              setTimeout(() => {
+                toastRef.current({
+                  variant: "destructive",
+                  title: "Capture Failed",
+                  description: "Couldn't get a clear image. Please hold steady and we'll try again.",
+                });
+                // Reset to allow retry
+                captureTriggeredRef.current = false;
+                // Restart the countdown
+                setCountdown(CAPTURE_DELAY / 1000);
+              }, 0);
             }
-          } else {
-            toast({
-              variant: "destructive",
-              title: "Capture Failed",
-              description: "Couldn't get a clear image. Please hold steady and we'll try again.",
-            });
-            captureTriggeredRef.current = false; // Reset to allow retry
-            setCountdown(CAPTURE_DELAY / 1000); 
+          } catch (error) {
+            console.error('Error during capture:', error);
+            setCaptureInProgress(false);
+            setTimeout(() => {
+              toastRef.current({
+                variant: "destructive",
+                title: "Capture Failed",
+                description: "There was a problem with the camera. Please try again.",
+              });
+              captureTriggeredRef.current = false;
+              // Restart the countdown
+              setCountdown(CAPTURE_DELAY / 1000);
+            }, 0);
           }
           return 0;
         }
@@ -327,9 +538,10 @@ export function BookIntakeFlow() {
     }, 1000);
 
     return () => {
+      console.log('Cleaning up timer effect');
       stopTimer();
     };
-  }, [isCameraReady, step, conditionImages, conditionCaptureStepIndex, conditionCaptureSteps, currentConditionStepLabel, stopTimer, captureFrame, handleAssessCondition, toast]);
+  }, [isCameraReady, step, conditionCaptureStepIndex, conditionCaptureSteps, captureFrame, handleAssessCondition]);
   
   if (!isClient) {
     return (
@@ -377,7 +589,6 @@ export function BookIntakeFlow() {
                     <CardDescription>Position your book cover in the frame. We'll take a picture automatically.</CardDescription>
                 </CardHeader>
                 <CardContent className="flex flex-col items-center gap-6">
-                 <canvas ref={canvasRef} className="hidden" />
                 {step === "METADATA_LOADING" ? (
                     <div className="flex flex-col items-center justify-center h-64 gap-4">
                         <Loader2 className="w-12 h-12 text-primary animate-spin" />
@@ -405,6 +616,39 @@ export function BookIntakeFlow() {
                                     <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
                                         Hold steady...
                                     </p>
+                                    <Button 
+                                      onClick={() => {
+                                        if (captureTriggeredRef.current || captureInProgress) {
+                                          console.log('Capture already in progress, ignoring manual trigger');
+                                          return;
+                                        }
+                                        
+                                        console.log('Manual capture button clicked');
+                                        captureTriggeredRef.current = true;
+                                        setCaptureInProgress(true);
+                                        const frame = captureFrame();
+                                        if (frame) {
+                                          console.log('Manual capture successful');
+                                          // Store the front cover image for both metadata AND condition assessment
+                                          const initialImage: CapturedImageData = { label: conditionCaptureSteps[0], dataUri: frame };
+                                          setConditionImages([initialImage]);
+                                          setConditionCaptureStepIndex(1); // Start condition capture from "Back Cover" (index 1)
+                                          setCapturedImage(frame);
+                                          setStep('METADATA_LOADING');
+                                        } else {
+                                          console.log('Manual capture failed');
+                                          // Reset trigger on failure
+                                          setTimeout(() => {
+                                            captureTriggeredRef.current = false;
+                                            setCaptureInProgress(false);
+                                          }, 500);
+                                        }
+                                      }}
+                                      className="mt-4 bg-white/20 text-white border-white/30"
+                                      variant="outline"
+                                    >
+                                      Capture Now (Debug)
+                                    </Button>
                                   </>
                                 ) : (
                                   <div className="flex flex-col items-center gap-2">
@@ -434,7 +678,11 @@ export function BookIntakeFlow() {
                  <CardHeader>
                      <Button variant="ghost" size="sm" className="self-start -ml-4" onClick={() => setStep('METADATA_CAPTURE')}><ChevronLeft /> Back to start</Button>
                      <CardTitle className="text-3xl font-headline">Step 2: Assess Condition</CardTitle>
-                     {step !== 'ASSESSMENT_CONFIRM' && <CardDescription>Follow the steps to capture all angles of your book.</CardDescription>}
+                     {step !== 'ASSESSMENT_CONFIRM' && (
+                       <CardDescription>
+                         Capturing image {conditionCaptureStepIndex + 1} of {conditionCaptureSteps.length}: <strong>{currentConditionStepLabel}</strong>
+                       </CardDescription>
+                     )}
                  </CardHeader>
                  <CardContent>
                  {step === "ASSESSMENT_LOADING" ? (
@@ -454,8 +702,8 @@ export function BookIntakeFlow() {
                             </div>
                         )}
                         <div className="grid grid-cols-4 sm:grid-cols-7 gap-2">
-                            {conditionImages.map(img => (
-                                <div key={img.label} className="relative aspect-[3/4]">
+                            {conditionImages.map((img, index) => (
+                                <div key={`${img.label}-${index}`} className="relative aspect-[3/4]">
                                     <Image src={img.dataUri} alt={img.label} fill className="rounded-md object-cover" data-ai-hint="book damage"/>
                                     <div className="absolute bottom-0 w-full bg-black/50 text-white text-xs text-center p-0.5 truncate">{img.label}</div>
                                 </div>
@@ -504,9 +752,10 @@ export function BookIntakeFlow() {
                                       <span className="text-3xl font-bold text-white tabular-nums">{countdown}</span>
                                     </div>
                                     <p className="text-center text-white mt-4 font-medium drop-shadow-md px-4">
-                                       Next: <span className="font-bold">{currentConditionStepLabel}</span>
+                                       Please position: <span className="font-bold">{currentConditionStepLabel}</span>
                                     </p>
-                                </>
+                                    {/* Remove debug buttons in production */}
+                                  </>
                                 ) : (
                                     <div className="flex flex-col items-center gap-2">
                                         <Loader2 className="w-8 h-8 animate-spin text-white" />
@@ -519,8 +768,8 @@ export function BookIntakeFlow() {
                         <div>
                             <p className="text-sm font-medium">Captured Images ({conditionImages.length}/{conditionCaptureSteps.length})</p>
                             <div className="flex gap-2 mt-2 flex-wrap">
-                                {conditionImages.map(img => (
-                                    <Image key={img.label} src={img.dataUri} alt={img.label} width={45} height={60} className="rounded" />
+                                {conditionImages.map((img, index) => (
+                                    <Image key={`preview-${img.label}-${index}`} src={img.dataUri} alt={img.label} width={45} height={60} className="rounded" />
                                 ))}
                             </div>
                         </div>
@@ -530,7 +779,11 @@ export function BookIntakeFlow() {
                  <CardFooter className="flex justify-between">
                      {step === 'ASSESSMENT_CONFIRM' ? (
                         <>
-                            <Button variant="outline" onClick={() => { setConditionImages([]); setConditionCaptureStepIndex(0); setStep('CONDITION_CAPTURE');}}>Try Again</Button>
+                            <Button variant="outline" onClick={() => { 
+                              setConditionImages([]); 
+                              setConditionCaptureStepIndex(0); 
+                              setStep('METADATA_CAPTURE'); // Start over from step 1 to recapture front cover
+                            }}>Try Again</Button>
                             <Button onClick={() => setStep('SUCCESS')}>Deposit & Get Credits</Button>
                         </>
                      ) : (
@@ -570,7 +823,10 @@ export function BookIntakeFlow() {
     }
   };
 
-  return <div className="w-full max-w-2xl">{renderStep()}</div>;
+  return <div className="w-full max-w-2xl">
+    <canvas ref={canvasRef} className="hidden" />
+    {renderStep()}
+  </div>;
 }
 
     

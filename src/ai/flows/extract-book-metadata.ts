@@ -8,7 +8,8 @@
  * - ExtractBookMetadataOutput - The return type for the extractBookMetadata function.
  */
 
-import {ai} from '@/ai/genkit';
+import {ai, aiModels} from '@/ai/genkit';
+import {retryWithBackoff} from '@/ai/utils';
 import {z} from 'genkit';
 
 const ExtractBookMetadataInputSchema = z.object({
@@ -27,7 +28,17 @@ const ExtractBookMetadataOutputSchema = z.object({
 export type ExtractBookMetadataOutput = z.infer<typeof ExtractBookMetadataOutputSchema>;
 
 export async function extractBookMetadata(input: ExtractBookMetadataInput): Promise<ExtractBookMetadataOutput> {
-  return extractBookMetadataFlow(input);
+  try {
+    return await retryWithBackoff(() => extractBookMetadataFlow(input));
+  } catch (error: any) {
+    console.error('Error extracting book metadata:', error);
+    
+    // Fallback response when all retries fail
+    return {
+      title: '',
+      author: ''
+    };
+  }
 }
 
 const prompt = ai.definePrompt({

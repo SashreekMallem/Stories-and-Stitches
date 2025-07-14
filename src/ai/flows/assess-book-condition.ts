@@ -8,7 +8,8 @@
  * - AssessBookConditionOutput - The return type for the assessBookCondition function.
  */
 
-import {ai} from '@/ai/genkit';
+import {ai, aiModels} from '@/ai/genkit';
+import {retryWithBackoff} from '@/ai/utils';
 import {z} from 'genkit';
 
 const AssessBookConditionInputSchema = z.object({
@@ -42,7 +43,18 @@ export type AssessBookConditionOutput = z.infer<typeof AssessBookConditionOutput
 export async function assessBookCondition(
   input: AssessBookConditionInput
 ): Promise<AssessBookConditionOutput> {
-  return assessBookConditionFlow(input);
+  try {
+    return await retryWithBackoff(() => assessBookConditionFlow(input));
+  } catch (error: any) {
+    console.error('Error assessing book condition:', error);
+    
+    // Fallback response when all retries fail
+    return {
+      conditionScore: 0.5, // Default to medium condition
+      creditEstimate: 1.0, // Default to minimal credit
+      justification: 'Unable to assess condition due to service availability. Please try again later or contact support.'
+    };
+  }
 }
 
 const prompt = ai.definePrompt({
