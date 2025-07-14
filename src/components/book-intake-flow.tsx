@@ -99,14 +99,6 @@ export function BookIntakeFlow() {
     return null;
   }, []);
 
-  const stopScanning = useCallback(() => {
-    if (scanIntervalRef.current) {
-      clearInterval(scanIntervalRef.current);
-      scanIntervalRef.current = null;
-    }
-    setIsScanning(false);
-  }, []);
-
   const handleExtractMetadata = useCallback(async (photoDataUri: string) => {
     setCapturedImage(photoDataUri);
     setStep("METADATA_LOADING");
@@ -164,7 +156,15 @@ export function BookIntakeFlow() {
     }
   }, [captureFrame, toast]);
 
-  const startScanning = useCallback(async (scanType: 'metadata' | 'condition') => {
+  const stopScanning = useCallback(() => {
+    if (scanIntervalRef.current) {
+      clearInterval(scanIntervalRef.current);
+      scanIntervalRef.current = null;
+    }
+    setIsScanning(false);
+  }, []);
+
+  const startScanning = useCallback((scanType: 'metadata' | 'condition') => {
     if (isScanning || !hasCameraPermission) return;
     setIsScanning(true);
 
@@ -193,53 +193,50 @@ export function BookIntakeFlow() {
 
   useEffect(() => {
     const getCameraPermission = async () => {
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({ video: true });
-        setHasCameraPermission(true);
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
+      if (hasCameraPermission === null) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+          setHasCameraPermission(true);
+          if (videoRef.current) {
+            videoRef.current.srcObject = stream;
+          }
+        } catch (error) {
+          console.error('Error accessing camera:', error);
+          setHasCameraPermission(false);
+          toast({
+            variant: 'destructive',
+            title: 'Camera Access Denied',
+            description: 'Please enable camera permissions in your browser settings to use this feature.',
+          });
         }
-      } catch (error) {
-        console.error('Error accessing camera:', error);
-        setHasCameraPermission(false);
-        toast({
-          variant: 'destructive',
-          title: 'Camera Access Denied',
-          description: 'Please enable camera permissions in your browser settings to use this feature.',
-        });
       }
     };
-
-    if (step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE') {
-        getCameraPermission();
+  
+    const isCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
+  
+    if (isCaptureStep) {
+      getCameraPermission();
     }
-    
+  
     if (step === 'METADATA_CAPTURE' && hasCameraPermission) {
       startScanning('metadata');
     }
-
+  
     if (step === 'CONDITION_CAPTURE' && hasCameraPermission && conditionForm.formState.isValid) {
       startScanning('condition');
     }
-
-    // Stop scanning and camera when not on a capture step
-    if (step !== 'METADATA_CAPTURE' && step !== 'CONDITION_CAPTURE') {
-      stopScanning();
-      if (videoRef.current && videoRef.current.srcObject) {
-          const stream = videoRef.current.srcObject as MediaStream;
-          stream.getTracks().forEach(track => track.stop());
-          videoRef.current.srcObject = null;
-      }
-    }
-    
+  
+    // Cleanup function
     return () => {
-        stopScanning();
-        if (videoRef.current && videoRef.current.srcObject) {
-            const stream = videoRef.current.srcObject as MediaStream;
-            stream.getTracks().forEach(track => track.stop());
-        }
-    }
+      stopScanning();
+      if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
+        const stream = videoRef.current.srcObject as MediaStream;
+        stream.getTracks().forEach(track => track.stop());
+        videoRef.current.srcObject = null;
+      }
+    };
   }, [step, hasCameraPermission, toast, startScanning, stopScanning, conditionForm.formState.isValid]);
+  
 
 
   const handleReset = () => {
@@ -247,6 +244,7 @@ export function BookIntakeFlow() {
     setMetadata(null);
     setAssessment(null);
     setCapturedImage(null);
+    setHasCameraPermission(null);
     conditionForm.reset();
   };
   
