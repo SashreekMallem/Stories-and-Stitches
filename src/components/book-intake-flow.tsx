@@ -106,6 +106,27 @@ export function BookIntakeFlow() {
     return null;
   }, []);
 
+  const handleAssessCondition = useCallback(async (description: string, photoDataUri: string) => {
+    setCapturedImage(photoDataUri);
+    setStep("ASSESSMENT_LOADING");
+    try {
+      const result = await assessBookCondition({
+        photoDataUri,
+        description,
+      });
+      setAssessment(result);
+      setStep("ASSESSMENT_CONFIRM");
+    } catch (error) {
+      console.error("Condition assessment error:", error);
+      toast({
+        variant: "destructive",
+        title: "An Error Occurred",
+        description: "Something went wrong. Please try again later.",
+      });
+      setStep("CONDITION_CAPTURE");
+    }
+  }, [toast]);
+
   const handleExtractMetadata = useCallback(async (photoDataUri: string) => {
     setCapturedImage(photoDataUri);
     setStep("METADATA_LOADING");
@@ -133,43 +154,15 @@ export function BookIntakeFlow() {
     }
   }, [toast]);
 
-  const handleAssessCondition = useCallback(async (description: string) => {
-    const photoDataUri = captureFrame();
-     if (!photoDataUri) {
-        toast({
-            variant: "destructive",
-            title: "Capture Failed",
-            description: "Could not capture an image from the camera.",
-        });
-        return;
-    }
-    setCapturedImage(photoDataUri);
-    setStep("ASSESSMENT_LOADING");
-    try {
-      const result = await assessBookCondition({
-        photoDataUri,
-        description,
-      });
-      setAssessment(result);
-      setStep("ASSESSMENT_CONFIRM");
-    } catch (error) {
-      console.error("Condition assessment error:", error);
-      toast({
-        variant: "destructive",
-        title: "An Error Occurred",
-        description: "Something went wrong. Please try again later.",
-      });
-      setStep("CONDITION_CAPTURE");
-    }
-  }, [captureFrame, toast]);
-
   const stopScanning = useCallback(() => {
     if (scanIntervalRef.current) {
       clearInterval(scanIntervalRef.current);
       scanIntervalRef.current = null;
     }
-    setIsScanning(false);
-  }, []);
+    if (isScanning) {
+      setIsScanning(false);
+    }
+  }, [isScanning]);
   
   // Effect for camera permission and stream management
   useEffect(() => {
@@ -197,10 +190,14 @@ export function BookIntakeFlow() {
     }
 
     return () => {
-      if (!isCaptureStep && videoRef.current && videoRef.current.srcObject) {
+      // Clean up stream when component unmounts or step changes
+      if (videoRef.current && videoRef.current.srcObject) {
         const mediaStream = videoRef.current.srcObject as MediaStream;
-        mediaStream.getTracks().forEach(track => track.stop());
-        videoRef.current.srcObject = null;
+        const isStillCaptureStep = step === 'METADATA_CAPTURE' || step === 'CONDITION_CAPTURE';
+        if (!isStillCaptureStep) {
+            mediaStream.getTracks().forEach(track => track.stop());
+            videoRef.current.srcObject = null;
+        }
       }
     }
   }, [step, hasCameraPermission, toast]);
@@ -208,8 +205,8 @@ export function BookIntakeFlow() {
 
   // Effect for smart scanning logic
   useEffect(() => {
-    const startScanning = async (scanType: 'metadata' | 'condition') => {
-      if (isScanning || !hasCameraPermission) return;
+    const startScanning = (scanType: 'metadata' | 'condition') => {
+      if (isScanning) return;
       setIsScanning(true);
   
       scanIntervalRef.current = setInterval(async () => {
@@ -222,23 +219,27 @@ export function BookIntakeFlow() {
           if (isReady) {
             stopScanning();
             if (scanType === 'metadata') {
-              await handleExtractMetadata(frame);
+              handleExtractMetadata(frame);
             } else if (scanType === 'condition') {
               const description = conditionForm.getValues('description');
-              await handleAssessCondition(description);
+              handleAssessCondition(description, frame);
             }
           }
         } catch (error) {
           console.error("Smart scan error:", error);
+          // Don't stop scanning on error, just log it.
         }
       }, SCAN_INTERVAL);
     };
 
-    if (step === 'METADATA_CAPTURE' && hasCameraPermission && !isScanning) {
+    const shouldScanMetadata = step === 'METADATA_CAPTURE' && hasCameraPermission && !isScanning;
+    const shouldScanCondition = step === 'CONDITION_CAPTURE' && hasCameraPermission && isConditionDescriptionValid && !isScanning;
+
+    if (shouldScanMetadata) {
       startScanning('metadata');
-    } else if (step === 'CONDITION_CAPTURE' && hasCameraPermission && isConditionDescriptionValid && !isScanning) {
+    } else if (shouldScanCondition) {
       startScanning('condition');
-    } else if (isScanning && (step !== 'METADATA_CAPTURE' && step !== 'CONDITION_CAPTURE')) {
+    } else {
        stopScanning();
     }
     
@@ -248,6 +249,7 @@ export function BookIntakeFlow() {
   }, [step, hasCameraPermission, isConditionDescriptionValid, isScanning, stopScanning, captureFrame, handleExtractMetadata, handleAssessCondition, conditionForm]);
 
   const handleReset = () => {
+    stopScanning();
     setStep("WELCOME");
     setMetadata(null);
     setAssessment(null);
@@ -495,3 +497,5 @@ export function BookIntakeFlow() {
 
   return <div className="w-full max-w-2xl">{renderStep()}</div>;
 }
+
+    
